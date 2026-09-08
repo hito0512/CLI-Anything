@@ -769,6 +769,24 @@ class TestReplBlockMissingContent:
         client.update_block.assert_called_once_with("markdown", "", "b1")
         skin.error.assert_not_called()
 
+    def test_block_update_double_dash_keeps_literal_file(self):
+        """REPL `block update b1 -- --file` treats --file as data, not an option."""
+        skin = MagicMock()
+        client = MagicMock()
+
+        _handle_block_repl(skin, client, ["block", "update", "b1", "--", "--file"], False, False)
+        client.update_block.assert_called_once_with("markdown", "--file", "b1")
+        skin.error.assert_not_called()
+
+    def test_block_insert_double_dash_keeps_literal_file(self):
+        """REPL `block insert p -- --file` inserts the literal text --file."""
+        skin = MagicMock()
+        client = MagicMock()
+
+        _handle_block_repl(skin, client, ["block", "insert", "p", "--", "--file"], False, False)
+        client.insert_block.assert_called_once_with("markdown", "--file", parent_id="p")
+        skin.error.assert_not_called()
+
     def test_block_insert_without_content_refuses(self):
         """REPL block insert without data or --file is rejected."""
         skin = MagicMock()

@@ -427,6 +427,10 @@ def _parse_repl_content_source(parts: list[str], start: int, skin: Any) -> tuple
     i = start
     while i < len(parts):
         p = parts[i]
+        if p == "--":
+            # Option terminator: everything after it is literal block data
+            rest.extend(parts[i + 1:])
+            break
         if p == "--file":
             if i + 1 >= len(parts):
                 skin.error("Option --file requires a value.")
