@@ -349,6 +349,11 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
                 stripped.append(p)
                 i += 1
         parts = stripped
+        # Stripping --md/--file may have removed the positionals themselves
+        # (e.g. `doc create nb1 --file note.md`); recheck before indexing.
+        if len(parts) < 4:
+            skin.error("Usage: doc create <notebook> <path> [--md content | --file path]")
+            return
         if file_path:
             if md:
                 skin.error("Use either --md or --file, not both.")

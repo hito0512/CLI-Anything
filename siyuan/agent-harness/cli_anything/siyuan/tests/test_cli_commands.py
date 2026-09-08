@@ -878,6 +878,38 @@ class TestReplDocCreateFile:
         skin.error.assert_called_once()
         assert "value" in skin.error.call_args[0][0].lower()
 
+    def test_doc_create_missing_path_after_file_reports_usage(self, tmp_path):
+        """doc create nb1 --file x (missing path) reports usage, not IndexError."""
+        skin = MagicMock()
+        client = MagicMock()
+        session = MagicMock()
+        note = tmp_path / "note.md"
+        note.write_text("from file", encoding="utf-8")
+
+        _handle_doc_repl(
+            skin, client, session,
+            ["doc", "create", "nb1", "--file", str(note)],
+            False, False,
+        )
+        client.create_doc_with_md.assert_not_called()
+        skin.error.assert_called_once()
+        assert "usage" in skin.error.call_args[0][0].lower()
+
+    def test_doc_create_missing_path_after_md_reports_usage(self):
+        """doc create nb1 --md x (missing path) reports usage, not IndexError."""
+        skin = MagicMock()
+        client = MagicMock()
+        session = MagicMock()
+
+        _handle_doc_repl(
+            skin, client, session,
+            ["doc", "create", "nb1", "--md", "content"],
+            False, False,
+        )
+        client.create_doc_with_md.assert_not_called()
+        skin.error.assert_called_once()
+        assert "usage" in skin.error.call_args[0][0].lower()
+
     def test_doc_create_stdin_sentinel_with_file_conflict(self, tmp_path):
         """--md - combined with --file is rejected, not silently preferring the file."""
         skin = MagicMock()
