@@ -250,13 +250,23 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
         return
 
     json_mode = "--json" in parts
-    dangerous = "--dangerous" in parts
-    parts = [p for p in parts if p not in ("--json", "--dangerous")]
+    parts = [p for p in parts if p != "--json"]
 
     client = ctx.client
     session = ctx.session
 
     command = parts[0]
+    verb = parts[1] if len(parts) > 1 else ""
+    # Only deletion commands treat --dangerous as a confirmation flag; other
+    # commands may legitimately carry the literal text as payload (e.g. a
+    # search query or block data), so parse it per-command.
+    is_delete = ((command in ("notebook", "doc") and verb == "remove")
+                 or (command == "block" and verb == "delete"))
+    if is_delete and "--dangerous" in parts:
+        dangerous = True
+        parts = [p for p in parts if p != "--dangerous"]
+    else:
+        dangerous = False
     if command == "notebook":
         _handle_notebook_repl(skin, client, session, parts, json_mode, dangerous)
     elif command == "doc":

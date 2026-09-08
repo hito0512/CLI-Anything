@@ -12,6 +12,7 @@ import pytest
 from click.testing import CliRunner
 
 from cli_anything.siyuan.siyuan_cli import (
+    _dispatch_repl,
     _handle_block_repl,
     _handle_doc_repl,
     _handle_notebook_repl,
@@ -615,6 +616,60 @@ class TestReplDeleteConfirmation:
         client = MagicMock()
         _handle_block_repl(skin, client, ["block", "delete", "b1"], False, True)
         client.delete_block.assert_called_once_with("b1")
+
+
+class TestReplDangerousParsing:
+    """--dangerous is parsed only for deletion commands in the dispatcher."""
+
+    def _dispatch(self, cmd):
+        skin = MagicMock()
+        ctx = MagicMock()
+        ctx.client = MagicMock()
+        ctx.session = MagicMock()
+        _dispatch_repl(skin, ctx, cmd)
+        return skin, ctx
+
+    def test_notebook_remove_parses_dangerous(self):
+        """notebook remove --dangerous reaches the handler as confirmation."""
+        skin, ctx = self._dispatch("notebook remove nb1 --dangerous")
+        ctx.client.remove_notebook.assert_called_once_with("nb1")
+        skin.error.assert_not_called()
+
+    def test_notebook_remove_without_dangerous_refuses(self):
+        """notebook remove without --dangerous is refused."""
+        skin, ctx = self._dispatch("notebook remove nb1")
+        ctx.client.remove_notebook.assert_not_called()
+        skin.error.assert_called_once()
+
+    def test_doc_remove_parses_dangerous(self):
+        """doc remove --dangerous reaches the handler as confirmation."""
+        skin, ctx = self._dispatch("doc remove doc1 --dangerous")
+        ctx.client.remove_doc_by_id.assert_called_once_with("doc1")
+        skin.error.assert_not_called()
+
+    def test_block_delete_parses_dangerous(self):
+        """block delete --dangerous reaches the handler as confirmation."""
+        skin, ctx = self._dispatch("block delete b1 --dangerous")
+        ctx.client.delete_block.assert_called_once_with("b1")
+        skin.error.assert_not_called()
+
+    def test_block_delete_without_dangerous_refuses(self):
+        """block delete without --dangerous is refused."""
+        skin, ctx = self._dispatch("block delete b1")
+        ctx.client.delete_block.assert_not_called()
+        skin.error.assert_called_once()
+
+    def test_search_keeps_dangerous_literal(self):
+        """search keeps --dangerous as part of the query, not a flag."""
+        skin, ctx = self._dispatch("search --dangerous")
+        ctx.client.search_blocks.assert_called_once_with("--dangerous")
+
+    def test_block_insert_keeps_dangerous_literal(self):
+        """block insert keeps --dangerous as data, not a confirmation flag."""
+        skin, ctx = self._dispatch("block insert p --dangerous")
+        ctx.client.insert_block.assert_called_once_with(
+            "markdown", "--dangerous", parent_id="p")
+        skin.error.assert_not_called()
 
 
 class TestReplBlockFile:
