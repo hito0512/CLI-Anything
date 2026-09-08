@@ -66,6 +66,8 @@ def _read_file(path: str) -> str:
             return f.read()
     except OSError as e:
         raise click.UsageError(f"Cannot read file '{path}': {e}")
+    except UnicodeDecodeError:
+        raise click.UsageError(f"File '{path}' is not valid UTF-8.")
 
 
 def _confirm_dangerous(dangerous: bool, action: str) -> None:

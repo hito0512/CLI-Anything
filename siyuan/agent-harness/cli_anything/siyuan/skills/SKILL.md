@@ -42,8 +42,8 @@ documents, blocks, search, and export.
 ### block — Block operations
 | Subcommand | Description |
 |------------|-------------|
-| `insert <data> [--previous / --parent / --file]` | Insert a block |
-| `update <id> <data> [--file]` | Update a block (doc root blocks are not updateable) |
+| `insert [<data> \| --file <path>] --parent <id>` | Insert a block (one anchor required: `--parent`/`--previous`/`--next`) |
+| `update <id> [<data> \| --file <path>]` | Update a block (doc root blocks are not updateable) |
 | `delete <id> [--dangerous]` | Delete a block (requires `--dangerous`) |
 | `get <id>` | Get block kramdown source |
 | `children <id>` | Get child blocks |

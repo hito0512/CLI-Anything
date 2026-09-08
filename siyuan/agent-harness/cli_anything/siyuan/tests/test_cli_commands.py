@@ -502,6 +502,20 @@ class TestFileContentReading:
                 assert result.exit_code == 2
                 mock_ctx.client.create_doc_with_md.assert_not_called()
 
+    def test_doc_create_non_utf8_file_is_usage_error(self, runner, mock_ctx):
+        """doc create --file with non-UTF-8 bytes yields a usage error, not a traceback."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            with runner.isolated_filesystem():
+                with open("note.md", "wb") as f:
+                    f.write(b"\xff\xfe\xfd\xfc not utf-8")
+                result = runner.invoke(
+                    cli, ["doc", "create", "nb1", "/test", "--file", "note.md"]
+                )
+                assert result.exit_code == 2
+                assert "not valid UTF-8" in result.output
+                assert "Traceback" not in result.output
+                mock_ctx.client.create_doc_with_md.assert_not_called()
+
     def test_block_update_with_file(self, runner, mock_ctx):
         """block update --file reads UTF-8 content directly from a file."""
         with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
