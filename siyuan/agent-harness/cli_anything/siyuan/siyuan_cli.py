@@ -453,15 +453,16 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             skin.error("Usage: block insert <parent_id> <data>")
             return
         parent_id = rest[0]
-        data = rest[1] if len(rest) > 1 else ""
+        has_data_arg = len(rest) > 1
+        data = rest[1] if has_data_arg else ""
         if file_path:
-            if data:
+            if has_data_arg:
                 skin.error("Provide block data either as an argument or via --file, not both.")
                 return
             data = _read_file(file_path)
-        elif data == "-":
+        elif has_data_arg and data == "-":
             data = _read_stdin()
-        elif not data:
+        elif not has_data_arg:
             skin.error("Provide block data either as an argument or via --file.")
             return
         result = client.insert_block("markdown", data, parent_id=parent_id)
@@ -481,15 +482,16 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             skin.error("Usage: block prepend <parent_id> <data>")
             return
         parent_id = rest[0]
-        data = rest[1] if len(rest) > 1 else ""
+        has_data_arg = len(rest) > 1
+        data = rest[1] if has_data_arg else ""
         if file_path:
-            if data:
+            if has_data_arg:
                 skin.error("Provide block data either as an argument or via --file, not both.")
                 return
             data = _read_file(file_path)
-        elif data == "-":
+        elif has_data_arg and data == "-":
             data = _read_stdin()
-        elif not data:
+        elif not has_data_arg:
             skin.error("Provide block data either as an argument or via --file.")
             return
         client.prepend_block("markdown", data, parent_id)
@@ -506,15 +508,16 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             skin.error("Usage: block append <parent_id> <data>")
             return
         parent_id = rest[0]
-        data = rest[1] if len(rest) > 1 else ""
+        has_data_arg = len(rest) > 1
+        data = rest[1] if has_data_arg else ""
         if file_path:
-            if data:
+            if has_data_arg:
                 skin.error("Provide block data either as an argument or via --file, not both.")
                 return
             data = _read_file(file_path)
-        elif data == "-":
+        elif has_data_arg and data == "-":
             data = _read_stdin()
-        elif not data:
+        elif not has_data_arg:
             skin.error("Provide block data either as an argument or via --file.")
             return
         client.append_block("markdown", data, parent_id)
@@ -531,15 +534,16 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             skin.error("Usage: block update <block_id> <data>")
             return
         block_id = rest[0]
-        data = rest[1] if len(rest) > 1 else ""
+        has_data_arg = len(rest) > 1
+        data = rest[1] if has_data_arg else ""
         if file_path:
-            if data:
+            if has_data_arg:
                 skin.error("Provide block data either as an argument or via --file, not both.")
                 return
             data = _read_file(file_path)
-        elif data == "-":
+        elif has_data_arg and data == "-":
             data = _read_stdin()
-        elif not data:
+        elif not has_data_arg:
             skin.error("Provide block data either as an argument or via --file.")
             return
         client.update_block("markdown", data, block_id)

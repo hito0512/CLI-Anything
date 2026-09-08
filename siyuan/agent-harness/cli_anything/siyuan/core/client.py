@@ -232,10 +232,11 @@ class SiYuanClient:
                 raise SiYuanClientError(
                     f"{e}. The target may be a document root block (doc ID), "
                     f"which is not a block in the block tree and cannot be "
-                    f"updated via block update. To change a document's body, "
-                    f"run `doc remove <docId> --dangerous` then `doc create "
-                    f"<box> <path> --file <md>` (or update a child block ID "
-                    f"instead)."
+                    f"updated via block update. Update a content block inside "
+                    f"the document instead — find one with `block children "
+                    f"<docId>` or `sql`, then update that child ID. Avoid "
+                    f"deleting and recreating the document: that would replace "
+                    f"the child block IDs and invalidate any references to them."
                 ) from e
             raise
 

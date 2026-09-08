@@ -106,17 +106,17 @@ siyuan ❯ quit
 | `notebook list` | List all notebooks |
 | `notebook create <name>` | Create a notebook |
 | `notebook rename <id> <name>` | Rename a notebook |
-| `notebook remove <id>` | Delete a notebook |
+| `notebook remove <id> --dangerous` | Delete a notebook (requires `--dangerous`) |
 | `notebook open <id>` | Open a notebook |
 | `doc create <notebook-id> <path>` | Create a document |
 | `doc list <notebook-id> [path]` | List documents |
 | `doc tree <notebook-id>` | Show document tree |
 | `doc get <id>` | Get document path by ID |
 | `doc rename <id> <title>` | Rename a document |
-| `doc remove <id>` | Delete a document |
+| `doc remove <id> --dangerous` | Delete a document (requires `--dangerous`) |
 | `block insert <data>` | Insert a block (use `-` or omit for stdin pipe) |
 | `block update <id> <data>` | Update block content (use `-` or omit for stdin pipe) |
-| `block delete <id>` | Delete a block |
+| `block delete <id> --dangerous` | Delete a block (requires `--dangerous`) |
 | `block get <id>` | Get block kramdown source |
 | `block children <id>` | Get child blocks |
 | `sql <stmt>` | Execute SQL query |

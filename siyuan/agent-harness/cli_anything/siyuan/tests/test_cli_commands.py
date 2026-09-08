@@ -760,6 +760,15 @@ class TestReplBlockMissingContent:
         client.update_block.assert_not_called()
         skin.error.assert_called_once()
 
+    def test_block_update_explicit_empty_preserved(self):
+        """REPL `block update b1 \"\"` keeps the intentional empty payload (clears block)."""
+        skin = MagicMock()
+        client = MagicMock()
+
+        _handle_block_repl(skin, client, ["block", "update", "b1", ""], False, False)
+        client.update_block.assert_called_once_with("markdown", "", "b1")
+        skin.error.assert_not_called()
+
     def test_block_insert_without_content_refuses(self):
         """REPL block insert without data or --file is rejected."""
         skin = MagicMock()

@@ -224,7 +224,8 @@ class TestUpdateBlockDocRootError:
         with pytest.raises(SiYuanClientError) as exc:
             client.update_block("markdown", "data", "doc-id")
         assert "document root block" in str(exc.value)
-        assert "doc remove" in str(exc.value)
+        assert "Update a content block" in str(exc.value)
+        assert "doc remove" not in str(exc.value)
 
     def test_update_block_other_error_unchanged(self, client):
         """update_block leaves unrelated errors intact."""
