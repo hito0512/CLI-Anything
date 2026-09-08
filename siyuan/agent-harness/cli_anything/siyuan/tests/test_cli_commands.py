@@ -681,6 +681,44 @@ class TestReplBlockFile:
         client.append_block.assert_called_once_with("markdown", "追加内容", "p")
 
 
+class TestReplBlockMissingContent:
+    def test_block_update_without_content_refuses(self):
+        """REPL block update without data or --file is rejected, not erasing the block."""
+        skin = MagicMock()
+        client = MagicMock()
+
+        _handle_block_repl(skin, client, ["block", "update", "b1"], False, False)
+        client.update_block.assert_not_called()
+        skin.error.assert_called_once()
+
+    def test_block_insert_without_content_refuses(self):
+        """REPL block insert without data or --file is rejected."""
+        skin = MagicMock()
+        client = MagicMock()
+
+        _handle_block_repl(skin, client, ["block", "insert", "p"], False, False)
+        client.insert_block.assert_not_called()
+        skin.error.assert_called_once()
+
+    def test_block_prepend_without_content_refuses(self):
+        """REPL block prepend without data or --file is rejected."""
+        skin = MagicMock()
+        client = MagicMock()
+
+        _handle_block_repl(skin, client, ["block", "prepend", "p"], False, False)
+        client.prepend_block.assert_not_called()
+        skin.error.assert_called_once()
+
+    def test_block_append_without_content_refuses(self):
+        """REPL block append without data or --file is rejected."""
+        skin = MagicMock()
+        client = MagicMock()
+
+        _handle_block_repl(skin, client, ["block", "append", "p"], False, False)
+        client.append_block.assert_not_called()
+        skin.error.assert_called_once()
+
+
 class TestReplDocCreateFile:
     def test_doc_create_with_file(self, tmp_path):
         """REPL doc create --file reads UTF-8 content from a file."""

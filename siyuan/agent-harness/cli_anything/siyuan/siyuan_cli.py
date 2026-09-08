@@ -449,6 +449,9 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             data = _read_file(file_path)
         elif data == "-":
             data = _read_stdin()
+        elif not data:
+            skin.error("Provide block data either as an argument or via --file.")
+            return
         result = client.insert_block("markdown", data, parent_id=parent_id)
         if json_mode:
             click.echo(json.dumps(result, ensure_ascii=False))
@@ -474,6 +477,9 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             data = _read_file(file_path)
         elif data == "-":
             data = _read_stdin()
+        elif not data:
+            skin.error("Provide block data either as an argument or via --file.")
+            return
         client.prepend_block("markdown", data, parent_id)
         skin.success("Block prepended")
     elif sub == "append":
@@ -496,6 +502,9 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             data = _read_file(file_path)
         elif data == "-":
             data = _read_stdin()
+        elif not data:
+            skin.error("Provide block data either as an argument or via --file.")
+            return
         client.append_block("markdown", data, parent_id)
         skin.success("Block appended")
     elif sub == "update":
@@ -518,6 +527,9 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             data = _read_file(file_path)
         elif data == "-":
             data = _read_stdin()
+        elif not data:
+            skin.error("Provide block data either as an argument or via --file.")
+            return
         client.update_block("markdown", data, block_id)
         skin.success("Block updated")
     elif sub == "delete" and len(parts) >= 3:
