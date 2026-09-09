@@ -138,27 +138,24 @@ class TestSessionManager:
 
     def test_default_state(self, mgr):
         """Fresh session has correct defaults."""
-        assert mgr.state.connected is False
         assert mgr.state.current_notebook_id == ""
         assert mgr.state.current_notebook_name == ""
         assert mgr.state.current_doc_id == ""
 
     def test_save_load_roundtrip(self, mgr):
         """Save then load preserves all state."""
-        mgr.update(current_notebook_id="nb1", current_notebook_name="Test", connected=True)
+        mgr.update(current_notebook_id="nb1", current_notebook_name="Test")
         mgr.save()
 
         mgr2 = SessionManager(state_dir=str(mgr.state_dir))
         mgr2.load()
         assert mgr2.state.current_notebook_id == "nb1"
         assert mgr2.state.current_notebook_name == "Test"
-        assert mgr2.state.connected is True
 
     def test_partial_update(self, mgr):
         """Update only changes specified fields."""
         mgr.update(current_notebook_id="nb1")
         assert mgr.state.current_notebook_id == "nb1"
-        assert mgr.state.connected is False  # unchanged
 
 
 class TestFindReplace:

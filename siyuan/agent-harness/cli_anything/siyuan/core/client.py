@@ -35,12 +35,13 @@ def load_config(config_path: str | None = None) -> SiYuanConfig:
         config_file = Path.home() / ".siyuan-cli.json"
 
     if config_file.is_file():
+        data = None
         try:
             data = json.loads(config_file.read_text(encoding="utf-8-sig"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             data = None
 
-        if data is not None:
+        if isinstance(data, dict):
             # File values as base, env vars override
             return SiYuanConfig(
                 host=os.environ.get("SIYUAN_HOST", data.get("host", "127.0.0.1")),
@@ -94,12 +95,18 @@ class SiYuanClient:
                 f"API returned status {resp.status_code}: {resp.text[:200]}"
             )
 
-        body = resp.json()
-        if body.get("code", 0) != 0:
+        try:
+            body = resp.json()
+        except ValueError as e:
             raise SiYuanClientError(
-                f"API error: {body.get('msg', 'unknown error')}"
-            )
-        return body.get("data")
+                f"Response from {self.config.base_url} is not valid JSON — is "
+                f"this really a SiYuan kernel? ({resp.text[:120]})"
+            ) from e
+        code = body.get("code", 0) if isinstance(body, dict) else -1
+        if code != 0:
+            msg = body.get("msg", "unknown error") if isinstance(body, dict) else str(body)
+            raise SiYuanClientError(f"API error: {msg}")
+        return body.get("data") if isinstance(body, dict) else body
 
     def ping(self) -> bool:
         """Check if SiYuan kernel is reachable."""
@@ -182,15 +189,33 @@ class SiYuanClient:
     def get_ids_by_hpath(self, notebook_id: str, path: str) -> list[str]:
         return self._post("/api/filetree/getIDsByHPath", {"notebook": notebook_id, "path": path})
 
-    def list_docs_by_path(self, notebook_id: str, path: str) -> list[dict[str, Any]]:
+    def list_docs_by_path(self, notebook_id: str, path: str) -> dict[str, Any]:
         return self._post("/api/filetree/listDocsByPath", {
             "notebook": notebook_id, "path": path, "maxListCount": 0,
         })
 
-    def list_doc_tree(self, notebook_id: str, path: str = "/", max_depth: int = -1, sort: int = 0) -> list[dict[str, Any]]:
-        return self._post("/api/filetree/listDocTree", {
-            "notebook": notebook_id, "path": path, "maxDepth": max_depth, "sort": sort,
-        })
+    def list_doc_tree(self, notebook_id: str, path: str = "/", max_depth: int = -1) -> dict[str, Any]:
+        """Recursively list the document tree rooted at path.
+
+        The filetree/listDocTree endpoint rejects root paths and returns no
+        names, so we build the tree from listDocsByPath instead.
+        """
+        return {"files": self._list_doc_dir(notebook_id, path, max_depth, 0)}
+
+    def _list_doc_dir(self, notebook_id: str, path: str, max_depth: int, depth: int) -> list[dict[str, Any]]:
+        data = self.list_docs_by_path(notebook_id, path)
+        files = data.get("files") if isinstance(data, dict) else data or []
+        nodes: list[dict[str, Any]] = []
+        for f in files:
+            node = {
+                "id": f.get("id", ""),
+                "name": f.get("name", ""),
+                "path": f.get("path", path),
+            }
+            if f.get("subFileCount", 0) > 0 and (max_depth < 0 or depth < max_depth):
+                node["children"] = self._list_doc_dir(notebook_id, node["path"], max_depth, depth + 1)
+            nodes.append(node)
+        return nodes
 
     def search_docs(self, keyword: str) -> list[dict[str, Any]]:
         return self._post("/api/filetree/searchDocs", {"k": keyword})
@@ -279,8 +304,10 @@ class SiYuanClient:
 
     # ── Search API ─────────────────────────────────────────────────────
 
-    def search_blocks(self, query: str) -> list[dict[str, Any]]:
-        return self._post("/api/search/fullTextSearchBlock", {"query": query})
+    def search_blocks(self, query: str, page: int = 1, page_size: int = 100) -> dict[str, Any]:
+        return self._post("/api/search/fullTextSearchBlock", {
+            "query": query, "page": page, "pageSize": page_size,
+        })
 
     def search_tag(self, tag: str = "") -> list[str]:
         """Search tags. Returns list of tag name strings."""

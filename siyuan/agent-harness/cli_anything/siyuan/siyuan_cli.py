@@ -208,12 +208,16 @@ def repl(ctx: click.Context):
         ctx_str = ""
         if state.current_notebook_name:
             ctx_str = state.current_notebook_name
-        user_input = skin.get_input(
-            pt_session,
-            project_name=state.current_doc_path or "",
-            modified=False,
-            context=ctx_str,
-        )
+        try:
+            user_input = skin.get_input(
+                pt_session,
+                project_name=state.current_doc_path or "",
+                modified=False,
+                context=ctx_str,
+            )
+        except (KeyboardInterrupt, EOFError):
+            obj.session.flush()
+            break
 
         if not user_input:
             continue
@@ -245,30 +249,77 @@ def repl(ctx: click.Context):
     skin.print_goodbye()
 
 
+def _tokenize_repl(line: str) -> list[str]:
+    r"""Split a REPL line into tokens, keeping literal backslashes.
+
+    shlex (posix) treats ``\`` outside quotes as an escape, so a Windows path
+    like ``--file C:\data\note.md`` silently loses its backslashes. Here single
+    quotes are fully literal and double quotes only treat ``\\``/``\"`` as
+    escapes; everything else (including bare ``\``) is kept verbatim. An
+    unclosed quote falls back to shlex semantics.
+    """
+    tokens: list[str] = []
+    cur: list[str] = []
+    quote = ""
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+            elif quote == '"' and ch == "\\" and i + 1 < n and line[i + 1] in '\\"':
+                cur.append(line[i + 1])
+                i += 1
+            else:
+                cur.append(ch)
+        elif ch in "'\"":
+            quote = ch
+        elif ch in " \t":
+            if cur:
+                tokens.append("".join(cur))
+                cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    if cur:
+        tokens.append("".join(cur))
+    if quote:
+        return shlex.split(line)
+    return tokens
+
+
 def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     """Parse REPL command and route to the appropriate handler."""
-    parts = shlex.split(cmd.strip())
+    parts = _tokenize_repl(cmd.strip())
     if not parts:
         return
-
-    json_mode = "--json" in parts
-    parts = [p for p in parts if p != "--json"]
 
     client = ctx.client
     session = ctx.session
 
-    command = parts[0]
-    verb = parts[1] if len(parts) > 1 else ""
+    # Options (--json / --dangerous) are recognized only before the `--`
+    # terminator, so tokens after it are literal payload for the command.
+    term = parts.index("--") if "--" in parts else len(parts)
+    head, tail = parts[:term], parts[term:]
+
+    json_mode = "--json" in head
+    head = [p for p in head if p != "--json"]
+    if not head:
+        return
+
+    command = head[0]
+    verb = head[1] if len(head) > 1 else ""
     # Only deletion commands treat --dangerous as a confirmation flag; other
     # commands may legitimately carry the literal text as payload (e.g. a
     # search query or block data), so parse it per-command.
     is_delete = ((command in ("notebook", "doc") and verb == "remove")
                  or (command == "block" and verb == "delete"))
-    if is_delete and "--dangerous" in parts:
+    dangerous = False
+    if is_delete and "--dangerous" in head:
         dangerous = True
-        parts = [p for p in parts if p != "--dangerous"]
-    else:
-        dangerous = False
+        head = [p for p in head if p != "--dangerous"]
+    parts = head + tail
+
     if command == "notebook":
         _handle_notebook_repl(skin, client, session, parts, json_mode, dangerous)
     elif command == "doc":
@@ -280,9 +331,12 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     elif command == "search" and len(parts) >= 2:
         _handle_search_repl(skin, client, parts, json_mode)
     elif command == "export":
+        if len(parts) < 2:
+            skin.error("Usage: export md <doc-id>")
+            return
         _handle_export_repl(skin, client, parts, json_mode)
     else:
-        skin.error(f"Unknown command: {parts[0]}")
+        skin.error(f"Unknown command: {command}")
 
 
 # ── REPL sub-handlers ──────────────────────────────────────────────────
@@ -463,7 +517,7 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             return
         parent_id = rest[0]
         has_data_arg = len(rest) > 1
-        data = rest[1] if has_data_arg else ""
+        data = " ".join(rest[1:]) if has_data_arg else ""
         if file_path:
             if has_data_arg:
                 skin.error("Provide block data either as an argument or via --file, not both.")
@@ -492,7 +546,7 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             return
         parent_id = rest[0]
         has_data_arg = len(rest) > 1
-        data = rest[1] if has_data_arg else ""
+        data = " ".join(rest[1:]) if has_data_arg else ""
         if file_path:
             if has_data_arg:
                 skin.error("Provide block data either as an argument or via --file, not both.")
@@ -518,7 +572,7 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             return
         parent_id = rest[0]
         has_data_arg = len(rest) > 1
-        data = rest[1] if has_data_arg else ""
+        data = " ".join(rest[1:]) if has_data_arg else ""
         if file_path:
             if has_data_arg:
                 skin.error("Provide block data either as an argument or via --file, not both.")
@@ -544,7 +598,7 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             return
         block_id = rest[0]
         has_data_arg = len(rest) > 1
-        data = rest[1] if has_data_arg else ""
+        data = " ".join(rest[1:]) if has_data_arg else ""
         if file_path:
             if has_data_arg:
                 skin.error("Provide block data either as an argument or via --file, not both.")
@@ -583,7 +637,10 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
 
 def _handle_sql_repl(skin: Any, client: SiYuanClient,
                      parts: list[str], json_mode: bool) -> None:
-    stmt = " ".join(parts[1:])
+    rest = parts[1:]
+    if rest and rest[0] == "--":
+        rest = rest[1:]  # drop the option terminator
+    stmt = " ".join(rest)
     results = client.query_sql(stmt)
     if json_mode:
         click.echo(json.dumps(results, ensure_ascii=False))
@@ -597,9 +654,13 @@ def _handle_sql_repl(skin: Any, client: SiYuanClient,
 
 def _handle_search_repl(skin: Any, client: SiYuanClient,
                         parts: list[str], json_mode: bool) -> None:
-    query = " ".join(parts[1:])
+    rest = parts[1:]
+    if rest and rest[0] == "--":
+        rest = rest[1:]  # drop the option terminator
+    query = " ".join(rest)
     data = client.search_blocks(query)
     blocks = data.get("blocks", []) if isinstance(data, dict) else data
+    matched = data.get("matchedBlockCount") if isinstance(data, dict) else None
     if json_mode:
         click.echo(json.dumps(blocks, ensure_ascii=False))
     elif not blocks:
@@ -607,6 +668,8 @@ def _handle_search_repl(skin: Any, client: SiYuanClient,
     else:
         skin.table(["ID", "Content"],
                    [[r.get("id", ""), r.get("content", "")[:80]] for r in blocks])
+        if matched is not None and matched > len(blocks):
+            skin.info(f"...showing {len(blocks)} of {matched} matches; use `sql` for complete results")
 
 
 def _handle_export_repl(skin: Any, client: SiYuanClient,
@@ -663,7 +726,10 @@ def notebook_remove(ctx: SiYuanContext, notebook_id: str, dangerous: bool):
     """Remove a notebook by ID (requires --dangerous confirmation)."""
     _confirm_dangerous(dangerous, "remove this notebook")
     ctx.client.remove_notebook(notebook_id)
-    click.echo(f"Removed notebook: {notebook_id}")
+    if ctx.json_output:
+        click.echo(json.dumps({"removed": notebook_id}, ensure_ascii=False))
+    else:
+        click.echo(f"Removed notebook: {notebook_id}")
 
 
 @notebook.command("rename")
@@ -673,7 +739,10 @@ def notebook_remove(ctx: SiYuanContext, notebook_id: str, dangerous: bool):
 def notebook_rename(ctx: SiYuanContext, notebook_id: str, name: str):
     """Rename a notebook."""
     ctx.client.rename_notebook(notebook_id, name)
-    click.echo(f"Renamed notebook {notebook_id} to: {name}")
+    if ctx.json_output:
+        click.echo(json.dumps({"renamed": notebook_id, "name": name}, ensure_ascii=False))
+    else:
+        click.echo(f"Renamed notebook {notebook_id} to: {name}")
 
 
 @notebook.command("open")
@@ -689,7 +758,10 @@ def notebook_open(ctx: SiYuanContext, notebook_id: str):
             break
     ctx.session.update(current_notebook_id=notebook_id, current_notebook_name=name)
     ctx.session.flush()
-    click.echo(f"Opened notebook: {name} ({notebook_id})")
+    if ctx.json_output:
+        click.echo(json.dumps({"opened": notebook_id, "name": name}, ensure_ascii=False))
+    else:
+        click.echo(f"Opened notebook: {name} ({notebook_id})")
 
 
 # ── Document commands ──────────────────────────────────────────────────
@@ -784,7 +856,10 @@ def doc_get(ctx: SiYuanContext, doc_id: str):
 def doc_rename(ctx: SiYuanContext, doc_id: str, title: str):
     """Rename a document."""
     ctx.client.rename_doc_by_id(doc_id, title)
-    click.echo(f"Renamed {doc_id} to: {title}")
+    if ctx.json_output:
+        click.echo(json.dumps({"renamed": doc_id, "title": title}, ensure_ascii=False))
+    else:
+        click.echo(f"Renamed {doc_id} to: {title}")
 
 
 @doc.command("remove")
@@ -795,7 +870,10 @@ def doc_remove(ctx: SiYuanContext, doc_id: str, dangerous: bool):
     """Remove a document (requires --dangerous confirmation)."""
     _confirm_dangerous(dangerous, "remove this document")
     ctx.client.remove_doc_by_id(doc_id)
-    click.echo(f"Removed: {doc_id}")
+    if ctx.json_output:
+        click.echo(json.dumps({"removed": doc_id}, ensure_ascii=False))
+    else:
+        click.echo(f"Removed: {doc_id}")
 
 
 # ── Block commands ─────────────────────────────────────────────────────
@@ -818,11 +896,13 @@ def block_insert(ctx: SiYuanContext, data: str | None, previous: str, parent: st
     if not parent and not previous and not next_:
         raise click.UsageError("An anchor is required: --parent, --previous, or --next")
     if file_path:
-        if data:
+        if data is not None:
             raise click.UsageError("Provide block data either as an argument or via --file, not both.")
         data = _read_file(file_path)
-    elif not data or data == "-":
+    elif data is None or data == "-":
         data = _read_stdin()
+        if not data:
+            raise click.UsageError("No block content provided: give it as an argument, via --file, or pipe a non-empty stdin.")
     result = ctx.client.insert_block(data_type, data, parent_id=parent, previous_id=previous, next_id=next_)
     if ctx.json_output:
         click.echo(json.dumps(result, ensure_ascii=False))
@@ -839,13 +919,18 @@ def block_insert(ctx: SiYuanContext, data: str | None, previous: str, parent: st
 def block_update(ctx: SiYuanContext, block_id: str, data: str | None, data_type: str, file_path: str):
     """Update a block's content. Data reads from stdin when '-' or omitted."""
     if file_path:
-        if data:
+        if data is not None:
             raise click.UsageError("Provide block data either as an argument or via --file, not both.")
         data = _read_file(file_path)
-    elif not data or data == "-":
+    elif data is None or data == "-":
         data = _read_stdin()
+        if not data:
+            raise click.UsageError("No block content provided: give it as an argument, via --file, or pipe a non-empty stdin.")
     ctx.client.update_block(data_type, data, block_id)
-    click.echo(f"Updated block: {block_id}")
+    if ctx.json_output:
+        click.echo(json.dumps({"updated": block_id}, ensure_ascii=False))
+    else:
+        click.echo(f"Updated block: {block_id}")
 
 
 @block.command("delete")
@@ -856,7 +941,10 @@ def block_delete(ctx: SiYuanContext, block_id: str, dangerous: bool):
     """Delete a block (requires --dangerous confirmation)."""
     _confirm_dangerous(dangerous, "delete this block")
     ctx.client.delete_block(block_id)
-    click.echo(f"Deleted block: {block_id}")
+    if ctx.json_output:
+        click.echo(json.dumps({"deleted": block_id}, ensure_ascii=False))
+    else:
+        click.echo(f"Deleted block: {block_id}")
 
 
 @block.command("get")
@@ -913,6 +1001,7 @@ def search(ctx: SiYuanContext, query: str):
     """Full-text search across all blocks."""
     data = ctx.client.search_blocks(query)
     blocks = data.get("blocks", []) if isinstance(data, dict) else data
+    matched = data.get("matchedBlockCount") if isinstance(data, dict) else None
     if ctx.json_output:
         click.echo(json.dumps(blocks, ensure_ascii=False))
     elif not blocks:
@@ -920,6 +1009,8 @@ def search(ctx: SiYuanContext, query: str):
     else:
         for r in blocks[:20]:
             click.echo(f"- {r.get('id', '')}: {r.get('content', '')[:120]}")
+        if matched is not None and matched > len(blocks):
+            click.echo(f"...showing {len(blocks)} of {matched} matches; use `sql` for complete results")
 
 
 # ── Export commands ────────────────────────────────────────────────────

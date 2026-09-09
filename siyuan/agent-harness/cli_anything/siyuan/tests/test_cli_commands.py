@@ -17,6 +17,7 @@ from cli_anything.siyuan.siyuan_cli import (
     _handle_doc_repl,
     _handle_notebook_repl,
     _read_stdin,
+    _tokenize_repl,
     cli,
 )
 
@@ -530,6 +531,21 @@ class TestFileContentReading:
                     "markdown", "更新后的中文内容", "b1"
                 )
 
+    def test_block_update_no_content_empty_stdin_refused(self, runner, mock_ctx):
+        """block update with no data/--file and empty stdin refuses, not erasing the block."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "update", "b1"])
+            assert result.exit_code == 2
+            assert "content" in result.output.lower()
+            mock_ctx.client.update_block.assert_not_called()
+
+    def test_block_update_explicit_empty_payload_allowed(self, runner, mock_ctx):
+        """block update b1 \"\" (explicit empty) is honoured, clearing the block."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "update", "b1", ""])
+            assert result.exit_code == 0
+            mock_ctx.client.update_block.assert_called_once_with("markdown", "", "b1")
+
 
 # ── stdin decoding fallback ────────────────────────────────────────────
 
@@ -985,3 +1001,56 @@ class TestBlockContentConflict:
             mock_ctx.client.update_block.assert_not_called()
 
 
+
+
+class TestReplTokenizer:
+    def test_windows_path_backslash_kept(self):
+        """Windows --file paths keep their backslashes through tokenizing."""
+        tokens = _tokenize_repl(r"block update b1 --file C:\data\note.md")
+        assert r"C:\data\note.md" in tokens
+
+    def test_quoted_multiword_kept(self):
+        """Double-quoted values survive as a single token."""
+        tokens = _tokenize_repl('doc create nb /x --md "hello world"')
+        assert "hello world" in tokens
+
+
+class TestReplDispatchRobustness:
+    def _dispatch(self, cmd):
+        skin = MagicMock()
+        ctx = MagicMock()
+        ctx.client = MagicMock()
+        ctx.session = MagicMock()
+        _dispatch_repl(skin, ctx, cmd)
+        return skin, ctx
+
+    def test_json_after_terminator_is_literal_data(self):
+        """--json after `--` is block data, not a mode flag."""
+        skin, ctx = self._dispatch("block insert p -- --json hello")
+        ctx.client.insert_block.assert_called_once_with(
+            "markdown", "--json hello", parent_id="p")
+        skin.error.assert_not_called()
+
+    def test_bare_export_reports_usage(self):
+        """`export` alone shows usage instead of an IndexError."""
+        skin, ctx = self._dispatch("export")
+        ctx.client.export_md_content.assert_not_called()
+        skin.error.assert_called_once()
+
+
+class TestMutationJsonOutput:
+    def test_block_update_json(self, runner, mock_ctx):
+        """--json block update emits a machine-readable object."""
+        mock_ctx.json_output = True
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["--json", "block", "update", "b1", "text"])
+            assert result.exit_code == 0
+            assert json.loads(result.output) == {"updated": "b1"}
+
+    def test_block_delete_json(self, runner, mock_ctx):
+        """--json block delete emits a machine-readable object."""
+        mock_ctx.json_output = True
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["--json", "block", "delete", "b1", "--dangerous"])
+            assert result.exit_code == 0
+            assert json.loads(result.output) == {"deleted": "b1"}
