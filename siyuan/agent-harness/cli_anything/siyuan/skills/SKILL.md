@@ -26,7 +26,7 @@ documents, blocks, search, and export.
 | `list` | List all notebooks |
 | `create <name>` | Create a new notebook |
 | `rename <id> <name>` | Rename a notebook |
-| `remove <id> [--dangerous]` | Delete a notebook (requires `--dangerous`) |
+| `remove <id> --dangerous` | Delete a notebook (requires `--dangerous`) |
 | `open <id>` | Open a notebook |
 
 ### doc — Document management
@@ -37,14 +37,14 @@ documents, blocks, search, and export.
 | `tree <notebook> [--path / --depth]` | Show doc tree |
 | `get <id>` | Get document path by ID |
 | `rename <id> <title>` | Rename a document |
-| `remove <id> [--dangerous]` | Delete a document (requires `--dangerous`) |
+| `remove <id> --dangerous` | Delete a document (requires `--dangerous`) |
 
 ### block — Block operations
 | Subcommand | Description |
 |------------|-------------|
 | `insert [<data> \| --file <path>] --parent <id>` | Insert a block (one anchor required: `--parent`/`--previous`/`--next`) |
 | `update <id> [<data> \| --file <path>]` | Update a block (doc root blocks are not updateable) |
-| `delete <id> [--dangerous]` | Delete a block (requires `--dangerous`) |
+| `delete <id> --dangerous` | Delete a block (requires `--dangerous`) |
 | `get <id>` | Get block kramdown source |
 | `children <id>` | Get child blocks |
 
