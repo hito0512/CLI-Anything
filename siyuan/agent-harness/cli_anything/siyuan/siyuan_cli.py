@@ -623,7 +623,7 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             click.echo(json.dumps({"kramdown": kramdown}, ensure_ascii=False))
         else:
             click.echo(kramdown)
-    elif sub == "child" and len(parts) >= 3:
+    elif sub in ("child", "children") and len(parts) >= 3:
         children = client.get_child_blocks(parts[2])
         if json_mode:
             click.echo(json.dumps(children, ensure_ascii=False))

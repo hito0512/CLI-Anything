@@ -1054,3 +1054,12 @@ class TestMutationJsonOutput:
             result = runner.invoke(cli, ["--json", "block", "delete", "b1", "--dangerous"])
             assert result.exit_code == 0
             assert json.loads(result.output) == {"deleted": "b1"}
+
+
+class TestReplBlockChildrenAlias:
+    def test_children_alias_accepted(self):
+        """REPL accepts the plural `block children` subcommand (matches one-shot)."""
+        skin = MagicMock()
+        client = MagicMock()
+        _handle_block_repl(skin, client, ["block", "children", "b1"], False, False)
+        client.get_child_blocks.assert_called_once_with("b1")
