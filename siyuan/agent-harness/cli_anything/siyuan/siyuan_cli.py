@@ -318,9 +318,10 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     if is_delete and "--dangerous" in head:
         dangerous = True
         head = [p for p in head if p != "--dangerous"]
-    # Drop the "--" delimiter itself; tokens after it stay literal for every
-    # handler (e.g. `notebook create -- --json` names the notebook "--json").
-    parts = head + tail[1:]
+    # The block parser recognizes literal data after "--" (block content that is
+    # exactly "--file"), so keep the delimiter for it; other commands get it
+    # dropped (e.g. `notebook create -- --json` names the notebook "--json").
+    parts = head + tail if command == "block" else head + tail[1:]
 
     if command == "notebook":
         _handle_notebook_repl(skin, client, session, parts, json_mode, dangerous)

@@ -1063,3 +1063,15 @@ class TestReplBlockChildrenAlias:
         client = MagicMock()
         _handle_block_repl(skin, client, ["block", "children", "b1"], False, False)
         client.get_child_blocks.assert_called_once_with("b1")
+
+
+class TestReplTerminatorBlock:
+    def test_block_file_after_terminator_is_literal(self):
+        """block keeps `--` so a literal `--file` payload survives dispatch."""
+        skin = MagicMock()
+        ctx = MagicMock()
+        ctx.client = MagicMock()
+        ctx.session = MagicMock()
+        _dispatch_repl(skin, ctx, "block update b1 -- --file")
+        ctx.client.update_block.assert_called_once_with("markdown", "--file", "b1")
+        skin.error.assert_not_called()
