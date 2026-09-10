@@ -1075,3 +1075,32 @@ class TestReplTerminatorBlock:
         _dispatch_repl(skin, ctx, "block update b1 -- --file")
         ctx.client.update_block.assert_called_once_with("markdown", "--file", "b1")
         skin.error.assert_not_called()
+
+
+class TestReplJsonFlag:
+    def _dispatch(self, cmd):
+        skin = MagicMock()
+        ctx = MagicMock()
+        ctx.client = MagicMock()
+        ctx.session = MagicMock()
+        _dispatch_repl(skin, ctx, cmd)
+        return skin, ctx
+
+    def test_leading_json_switch(self):
+        """A leading --json switches to JSON mode (one-shot parity)."""
+        skin = MagicMock()
+        ctx = MagicMock()
+        ctx.client = MagicMock()
+        ctx.session = MagicMock()
+        ctx.client.list_notebooks.return_value = [
+            {"id": "nb1", "name": "N", "closed": False}]
+        _dispatch_repl(skin, ctx, "--json notebook list")
+        ctx.client.list_notebooks.assert_called_once()
+        skin.table.assert_not_called()
+
+    def test_payload_json_literal_needs_no_escape(self):
+        """`--json` inside block data is literal — no `--` required."""
+        skin, ctx = self._dispatch("block insert p --json hello")
+        ctx.client.insert_block.assert_called_once_with(
+            "markdown", "--json hello", parent_id="p")
+        skin.error.assert_not_called()

@@ -297,13 +297,16 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     client = ctx.client
     session = ctx.session
 
-    # Options (--json / --dangerous) are recognized only before the `--`
-    # terminator, so tokens after it are literal payload for the command.
+    # `--json` is a leading switch only (like one-shot `sy --json …`), so the
+    # literal text "--json" in a payload needs no escaping. `--dangerous` is a
+    # confirmation flag for deletion commands only. A `--` terminator keeps the
+    # following tokens literal for the block parser (payload exactly "--file").
     term = parts.index("--") if "--" in parts else len(parts)
     head, tail = parts[:term], parts[term:]
 
-    json_mode = "--json" in head
-    head = [p for p in head if p != "--json"]
+    json_mode = bool(head) and head[0] == "--json"
+    if json_mode:
+        head = head[1:]
     if not head:
         return
 
