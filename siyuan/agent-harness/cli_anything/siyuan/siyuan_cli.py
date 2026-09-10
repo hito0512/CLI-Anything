@@ -6,7 +6,6 @@ commands for notebooks, documents, blocks, search, and export.
 
 import json
 import os
-import shlex
 import sys
 from typing import Any
 
@@ -261,6 +260,7 @@ def _tokenize_repl(line: str) -> list[str]:
     tokens: list[str] = []
     cur: list[str] = []
     quote = ""
+    quoted = False
     i, n = 0, len(line)
     while i < n:
         ch = line[i]
@@ -274,17 +274,17 @@ def _tokenize_repl(line: str) -> list[str]:
                 cur.append(ch)
         elif ch in "'\"":
             quote = ch
+            quoted = True
         elif ch in " \t":
-            if cur:
+            if cur or quoted:
                 tokens.append("".join(cur))
                 cur = []
+                quoted = False
         else:
             cur.append(ch)
         i += 1
-    if cur:
+    if cur or quoted:
         tokens.append("".join(cur))
-    if quote:
-        return shlex.split(line)
     return tokens
 
 
@@ -501,7 +501,7 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
                        parts: list[str], json_mode: bool,
                        dangerous: bool = False) -> None:
     if len(parts) < 2:
-        skin.error("Usage: block <insert|prepend|append|update|delete|get|child>")
+        skin.error("Usage: block <insert|prepend|append|update|delete|get|children>")
         return
     sub = parts[1]
     if sub == "insert":
@@ -1007,10 +1007,11 @@ def search(ctx: SiYuanContext, query: str):
     elif not blocks:
         click.echo("No results")
     else:
-        for r in blocks[:20]:
+        shown = blocks[:20]
+        for r in shown:
             click.echo(f"- {r.get('id', '')}: {r.get('content', '')[:120]}")
-        if matched is not None and matched > len(blocks):
-            click.echo(f"...showing {len(blocks)} of {matched} matches; use `sql` for complete results")
+        if matched is not None and matched > len(shown):
+            click.echo(f"...showing {len(shown)} of {matched} matches; use `sql` for complete results")
 
 
 # ── Export commands ────────────────────────────────────────────────────

@@ -23,11 +23,20 @@ class SiYuanConfig:
         return f"http://{self.host}:{self.port}"
 
 
+def _parse_port(value: Any, default: int = 6806) -> int:
+    """Parse a port from config/env; invalid values degrade to default."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def load_config(config_path: str | None = None) -> SiYuanConfig:
     """Load SiYuan connection config from file or environment.
 
     Priority: explicit path -> env vars -> defaults.
     Config file is JSON: {"host": "...", "port": 6806, "token": "..."}
+    Corrupt files / invalid values degrade to the next layer, never crash.
     """
     if config_path:
         config_file = Path(config_path)
@@ -45,13 +54,13 @@ def load_config(config_path: str | None = None) -> SiYuanConfig:
             # File values as base, env vars override
             return SiYuanConfig(
                 host=os.environ.get("SIYUAN_HOST", data.get("host", "127.0.0.1")),
-                port=int(os.environ.get("SIYUAN_PORT", data.get("port", 6806))),
+                port=_parse_port(os.environ.get("SIYUAN_PORT", data.get("port", 6806))),
                 token=os.environ.get("SIYUAN_TOKEN", data.get("token", "")),
             )
 
     return SiYuanConfig(
         host=os.environ.get("SIYUAN_HOST", "127.0.0.1"),
-        port=int(os.environ.get("SIYUAN_PORT", "6806")),
+        port=_parse_port(os.environ.get("SIYUAN_PORT", "6806")),
         token=os.environ.get("SIYUAN_TOKEN", ""),
     )
 
@@ -120,6 +129,8 @@ class SiYuanClient:
     def list_notebooks(self) -> list[dict[str, Any]]:
         """List all notebooks."""
         data = self._post("/api/notebook/lsNotebooks")
+        if not isinstance(data, dict):
+            return []
         return data.get("notebooks", [])
 
     def open_notebook(self, notebook_id: str) -> None:

@@ -45,8 +45,12 @@ class SessionManager:
         if self.session_path.is_file():
             try:
                 data = json.loads(self.session_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                data = None
+            # Non-dict top level (e.g. a list) degrades to defaults, no crash
+            if isinstance(data, dict):
                 self.state = SessionState.from_dict(data)
-            except (json.JSONDecodeError, KeyError, OSError, UnicodeDecodeError):
+            else:
                 self.state = SessionState()
         return self.state
 
