@@ -1104,3 +1104,31 @@ class TestReplJsonFlag:
         ctx.client.insert_block.assert_called_once_with(
             "markdown", "--json hello", parent_id="p")
         skin.error.assert_not_called()
+
+
+class TestReplQuotedLiteral:
+    def _dispatch(self, cmd):
+        skin = MagicMock()
+        ctx = MagicMock()
+        ctx.client = MagicMock()
+        ctx.session = MagicMock()
+        _dispatch_repl(skin, ctx, cmd)
+        return skin, ctx
+
+    def test_quoted_file_is_literal(self):
+        """A quoted "--file" is data, not the --file option."""
+        skin, ctx = self._dispatch('block update b1 "--file"')
+        ctx.client.update_block.assert_called_once_with("markdown", "--file", "b1")
+        skin.error.assert_not_called()
+
+    def test_quoted_md_value_is_literal(self):
+        """doc create --md "--file" writes the literal text."""
+        skin, ctx = self._dispatch('doc create nb1 /x --md "--file"')
+        ctx.client.create_doc_with_md.assert_called_once_with("nb1", "/x", "--file")
+        skin.error.assert_not_called()
+
+    def test_terminator_still_works(self):
+        """The `--` terminator remains supported."""
+        skin, ctx = self._dispatch('block insert p -- --file')
+        ctx.client.insert_block.assert_called_once_with(
+            "markdown", "--file", parent_id="p")

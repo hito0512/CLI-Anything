@@ -248,14 +248,19 @@ def repl(ctx: click.Context):
     skin.print_goodbye()
 
 
+class _Quoted(str):
+    """A REPL token that was wrapped in quotes; never treated as an option."""
+
+
 def _tokenize_repl(line: str) -> list[str]:
     r"""Split a REPL line into tokens, keeping literal backslashes.
 
     shlex (posix) treats ``\`` outside quotes as an escape, so a Windows path
     like ``--file C:\data\note.md`` silently loses its backslashes. Here single
     quotes are fully literal and double quotes only treat ``\\``/``\"`` as
-    escapes; everything else (including bare ``\``) is kept verbatim. An
-    unclosed quote falls back to shlex semantics.
+    escapes; everything else (including bare ``\``) is kept verbatim. Tokens
+    that contained quotes come back as :class:`_Quoted`, so the parser treats
+    them as literal text — e.g. `"--file"` is data, not the --file option.
     """
     tokens: list[str] = []
     cur: list[str] = []
@@ -277,14 +282,16 @@ def _tokenize_repl(line: str) -> list[str]:
             quoted = True
         elif ch in " \t":
             if cur or quoted:
-                tokens.append("".join(cur))
+                token = "".join(cur)
+                tokens.append(_Quoted(token) if quoted else token)
                 cur = []
                 quoted = False
         else:
             cur.append(ch)
         i += 1
     if cur or quoted:
-        tokens.append("".join(cur))
+        token = "".join(cur)
+        tokens.append(_Quoted(token) if quoted else token)
     return tokens
 
 
@@ -304,7 +311,7 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     term = parts.index("--") if "--" in parts else len(parts)
     head, tail = parts[:term], parts[term:]
 
-    json_mode = bool(head) and head[0] == "--json"
+    json_mode = bool(head) and head[0] == "--json" and not isinstance(head[0], _Quoted)
     if json_mode:
         head = head[1:]
     if not head:
@@ -318,9 +325,11 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     is_delete = ((command in ("notebook", "doc") and verb == "remove")
                  or (command == "block" and verb == "delete"))
     dangerous = False
-    if is_delete and "--dangerous" in head:
+    if is_delete and any(
+            p == "--dangerous" and not isinstance(p, _Quoted) for p in head):
         dangerous = True
-        head = [p for p in head if p != "--dangerous"]
+        head = [p for p in head
+                if not (p == "--dangerous" and not isinstance(p, _Quoted))]
     # The block parser recognizes literal data after "--" (block content that is
     # exactly "--file"), so keep the delimiter for it; other commands get it
     # dropped (e.g. `notebook create -- --json` names the notebook "--json").
@@ -396,7 +405,7 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
         i = 0
         while i < len(parts):
             p = parts[i]
-            if p in ("--md", "--file"):
+            if p in ("--md", "--file") and not isinstance(p, _Quoted):
                 if i + 1 >= len(parts):
                     skin.error(f"Option {p} requires a value.")
                     return
@@ -485,11 +494,11 @@ def _parse_repl_content_source(parts: list[str], start: int, skin: Any) -> tuple
     i = start
     while i < len(parts):
         p = parts[i]
-        if p == "--":
+        if p == "--" and not isinstance(p, _Quoted):
             # Option terminator: everything after it is literal block data
             rest.extend(parts[i + 1:])
             break
-        if p == "--file":
+        if p == "--file" and not isinstance(p, _Quoted):
             if i + 1 >= len(parts):
                 skin.error("Option --file requires a value.")
                 return None
