@@ -248,19 +248,13 @@ def repl(ctx: click.Context):
     skin.print_goodbye()
 
 
-class _Quoted(str):
-    """A REPL token that was wrapped in quotes; never treated as an option."""
-
-
 def _tokenize_repl(line: str) -> list[str]:
     r"""Split a REPL line into tokens, keeping literal backslashes.
 
     shlex (posix) treats ``\`` outside quotes as an escape, so a Windows path
     like ``--file C:\data\note.md`` silently loses its backslashes. Here single
     quotes are fully literal and double quotes only treat ``\\``/``\"`` as
-    escapes; everything else (including bare ``\``) is kept verbatim. Tokens
-    that contained quotes come back as :class:`_Quoted`, so the parser treats
-    them as literal text — e.g. `"--file"` is data, not the --file option.
+    escapes; everything else (including bare ``\``) is kept verbatim.
     """
     tokens: list[str] = []
     cur: list[str] = []
@@ -282,16 +276,14 @@ def _tokenize_repl(line: str) -> list[str]:
             quoted = True
         elif ch in " \t":
             if cur or quoted:
-                token = "".join(cur)
-                tokens.append(_Quoted(token) if quoted else token)
+                tokens.append("".join(cur))
                 cur = []
                 quoted = False
         else:
             cur.append(ch)
         i += 1
     if cur or quoted:
-        token = "".join(cur)
-        tokens.append(_Quoted(token) if quoted else token)
+        tokens.append("".join(cur))
     return tokens
 
 
@@ -304,36 +296,22 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     client = ctx.client
     session = ctx.session
 
-    # `--json` is a leading switch only (like one-shot `sy --json …`), so the
-    # literal text "--json" in a payload needs no escaping. `--dangerous` is a
-    # confirmation flag for deletion commands only. A `--` terminator keeps the
-    # following tokens literal for the block parser (payload exactly "--file").
-    term = parts.index("--") if "--" in parts else len(parts)
-    head, tail = parts[:term], parts[term:]
-
-    json_mode = bool(head) and head[0] == "--json" and not isinstance(head[0], _Quoted)
+    # `--json` is a leading switch only (like one-shot `sy --json …`).
+    # `--dangerous` is a confirmation flag for deletion commands only.
+    json_mode = parts[0] == "--json"
     if json_mode:
-        head = head[1:]
-    if not head:
+        parts = parts[1:]
+    if not parts:
         return
 
-    command = head[0]
-    verb = head[1] if len(head) > 1 else ""
-    # Only deletion commands treat --dangerous as a confirmation flag; other
-    # commands may legitimately carry the literal text as payload (e.g. a
-    # search query or block data), so parse it per-command.
+    command = parts[0]
+    verb = parts[1] if len(parts) > 1 else ""
     is_delete = ((command in ("notebook", "doc") and verb == "remove")
                  or (command == "block" and verb == "delete"))
     dangerous = False
-    if is_delete and any(
-            p == "--dangerous" and not isinstance(p, _Quoted) for p in head):
+    if is_delete and "--dangerous" in parts:
         dangerous = True
-        head = [p for p in head
-                if not (p == "--dangerous" and not isinstance(p, _Quoted))]
-    # The block parser recognizes literal data after "--" (block content that is
-    # exactly "--file"), so keep the delimiter for it; other commands get it
-    # dropped (e.g. `notebook create -- --json` names the notebook "--json").
-    parts = head + tail if command == "block" else head + tail[1:]
+        parts = [p for p in parts if p != "--dangerous"]
 
     if command == "notebook":
         _handle_notebook_repl(skin, client, session, parts, json_mode, dangerous)
@@ -405,7 +383,7 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
         i = 0
         while i < len(parts):
             p = parts[i]
-            if p in ("--md", "--file") and not isinstance(p, _Quoted):
+            if p in ("--md", "--file"):
                 if i + 1 >= len(parts):
                     skin.error(f"Option {p} requires a value.")
                     return
@@ -484,21 +462,17 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
 
 
 def _parse_repl_content_source(parts: list[str], start: int, skin: Any) -> tuple[list[str], str] | None:
-    """Strip a --file <path> pair from parts[start:].
+    """Split parts[start:] into (positionals, file_path).
 
-    Returns (remaining positional args, file_path).  Emits an error and returns
-    None when --file has no following value.
+    `--file <path>` is an option anywhere in the content slot; every other token
+    is literal content. No `--` terminator and no quoting trick.
     """
     rest: list[str] = []
     file_path = ""
     i = start
     while i < len(parts):
         p = parts[i]
-        if p == "--" and not isinstance(p, _Quoted):
-            # Option terminator: everything after it is literal block data
-            rest.extend(parts[i + 1:])
-            break
-        if p == "--file" and not isinstance(p, _Quoted):
+        if p == "--file":
             if i + 1 >= len(parts):
                 skin.error("Option --file requires a value.")
                 return None
