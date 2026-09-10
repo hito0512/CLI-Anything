@@ -689,17 +689,17 @@ class TestReplDangerousParsing:
         ctx.client.delete_block.assert_not_called()
         skin.error.assert_called_once()
 
-    def test_search_keeps_dangerous_literal(self):
-        """search keeps --dangerous as part of the query, not a flag."""
+    def test_dangerous_rejected_for_non_delete(self):
+        """--dangerous outside a delete command is an error, not content."""
         skin, ctx = self._dispatch("search --dangerous")
-        ctx.client.search_blocks.assert_called_once_with("--dangerous")
+        ctx.client.search_blocks.assert_not_called()
+        skin.error.assert_called_once()
 
-    def test_block_insert_keeps_dangerous_literal(self):
-        """block insert keeps --dangerous as data, not a confirmation flag."""
+    def test_dangerous_rejected_for_block_insert(self):
+        """--dangerous is not valid outside delete commands."""
         skin, ctx = self._dispatch("block insert p --dangerous")
-        ctx.client.insert_block.assert_called_once_with(
-            "markdown", "--dangerous", parent_id="p")
-        skin.error.assert_not_called()
+        ctx.client.insert_block.assert_not_called()
+        skin.error.assert_called_once()
 
 
 class TestReplBlockFile:
@@ -1006,12 +1006,11 @@ class TestReplDispatchRobustness:
         _dispatch_repl(skin, ctx, cmd)
         return skin, ctx
 
-    def test_double_dash_is_plain_text(self):
-        """`--` has no special meaning: it is ordinary block content."""
+    def test_misplaced_json_switch_rejected(self):
+        """A --json anywhere but the front is an error, not data."""
         skin, ctx = self._dispatch("block insert p -- --json hello")
-        ctx.client.insert_block.assert_called_once_with(
-            "markdown", "-- --json hello", parent_id="p")
-        skin.error.assert_not_called()
+        ctx.client.insert_block.assert_not_called()
+        skin.error.assert_called_once()
 
     def test_bare_export_reports_usage(self):
         """`export` alone shows usage instead of an IndexError."""
@@ -1068,9 +1067,14 @@ class TestReplJsonFlag:
         ctx.client.list_notebooks.assert_called_once()
         skin.table.assert_not_called()
 
-    def test_payload_json_literal_needs_no_escape(self):
-        """`--json` inside block data is literal — no `--` required."""
+    def test_json_switch_must_lead(self):
+        """--json mid-command is rejected; it works only as the first token."""
         skin, ctx = self._dispatch("block insert p --json hello")
-        ctx.client.insert_block.assert_called_once_with(
-            "markdown", "--json hello", parent_id="p")
+        ctx.client.insert_block.assert_not_called()
+        skin.error.assert_called_once()
+
+    def test_option_value_may_look_like_a_flag(self):
+        """A --md value that is literally "--json" is data, not a switch."""
+        skin, ctx = self._dispatch('doc create nb1 /x --md "--json"')
+        ctx.client.create_doc_with_md.assert_called_once_with("nb1", "/x", "--json")
         skin.error.assert_not_called()

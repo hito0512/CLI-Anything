@@ -296,12 +296,26 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     client = ctx.client
     session = ctx.session
 
-    # `--json` is a leading switch only (like one-shot `sy --json …`).
-    # `--dangerous` is a confirmation flag for deletion commands only.
+    # Each flag has exactly one meaning; a known flag in the wrong place errors
+    # rather than being silently treated as content. A token that is the value
+    # of --md/--file is data, not a flag.
     json_mode = parts[0] == "--json"
     if json_mode:
         parts = parts[1:]
     if not parts:
+        return
+
+    value_idx: set[int] = set()
+    j = 0
+    while j < len(parts) - 1:
+        if parts[j] in ("--md", "--file"):
+            value_idx.add(j + 1)
+            j += 2
+        else:
+            j += 1
+    stray = {p for k, p in enumerate(parts) if k not in value_idx}
+    if "--json" in stray:
+        skin.error("--json must come before the command (e.g. `--json notebook list`)")
         return
 
     command = parts[0]
@@ -309,9 +323,14 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     is_delete = ((command in ("notebook", "doc") and verb == "remove")
                  or (command == "block" and verb == "delete"))
     dangerous = False
-    if is_delete and "--dangerous" in parts:
-        dangerous = True
-        parts = [p for p in parts if p != "--dangerous"]
+    if is_delete:
+        if "--dangerous" in stray:
+            dangerous = True
+            parts = [p for k, p in enumerate(parts)
+                     if not (k not in value_idx and p == "--dangerous")]
+    elif "--dangerous" in stray:
+        skin.error("--dangerous only confirms deletion (notebook/doc remove, block delete)")
+        return
 
     if command == "notebook":
         _handle_notebook_repl(skin, client, session, parts, json_mode, dangerous)
