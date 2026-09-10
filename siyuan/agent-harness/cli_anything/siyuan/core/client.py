@@ -51,10 +51,12 @@ def load_config(config_path: str | None = None) -> SiYuanConfig:
             data = None
 
         if isinstance(data, dict):
-            # File values as base, env vars override
+            # File values as base, env vars override; an invalid env value
+            # degrades to the file-configured port, not the built-in default
+            file_port = _parse_port(data.get("port", 6806))
             return SiYuanConfig(
                 host=os.environ.get("SIYUAN_HOST", data.get("host", "127.0.0.1")),
-                port=_parse_port(os.environ.get("SIYUAN_PORT", data.get("port", 6806))),
+                port=_parse_port(os.environ.get("SIYUAN_PORT"), file_port),
                 token=os.environ.get("SIYUAN_TOKEN", data.get("token", "")),
             )
 

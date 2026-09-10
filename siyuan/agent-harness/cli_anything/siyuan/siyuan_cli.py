@@ -318,7 +318,9 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     if is_delete and "--dangerous" in head:
         dangerous = True
         head = [p for p in head if p != "--dangerous"]
-    parts = head + tail
+    # Drop the "--" delimiter itself; tokens after it stay literal for every
+    # handler (e.g. `notebook create -- --json` names the notebook "--json").
+    parts = head + tail[1:]
 
     if command == "notebook":
         _handle_notebook_repl(skin, client, session, parts, json_mode, dangerous)
