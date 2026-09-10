@@ -142,14 +142,12 @@ The API token can be found in Settings → About.
 
 ### Block insert/update with multi-line content
 
-`block insert` and `block update` accept data via stdin pipe when the argument is `-` or omitted:
+`block insert` and `block update` read data from a stdin pipe when the data argument is omitted (there is no `-` marker — a literal `-` is just data):
 
 ```bash
 # Pipe multi-line content
 cat note.md | cli-anything-siyuan block insert --parent <block-id>
-
-# Explicit stdin marker
-echo "hello" | cli-anything-siyuan block update <block-id> -
+echo "hello" | cli-anything-siyuan block update <block-id>
 
 # Requires one of: --parent <id>, --previous <id>, --next <id>
 ```
