@@ -44,8 +44,10 @@ def _read_stdin() -> str:
     if pinned:
         try:
             return raw.decode(pinned)
-        except (UnicodeDecodeError, LookupError):
-            return raw.decode("utf-8-sig", errors="replace")
+        except LookupError:
+            raise click.UsageError(f"Unknown SIYUAN_STDIN_ENCODING: {pinned!r}")
+        except UnicodeDecodeError as e:
+            raise click.UsageError(f"stdin is not valid {pinned}: {e}")
     for enc in ("utf-8-sig", "gb18030"):
         try:
             return raw.decode(enc)
@@ -248,6 +250,10 @@ def repl(ctx: click.Context):
     skin.print_goodbye()
 
 
+class _UnmatchedQuote(ValueError):
+    """Raised when the REPL input has an unclosed quote."""
+
+
 def _tokenize_repl(line: str) -> list[str]:
     r"""Split a REPL line into tokens, keeping literal backslashes.
 
@@ -284,12 +290,18 @@ def _tokenize_repl(line: str) -> list[str]:
         i += 1
     if cur or quoted:
         tokens.append("".join(cur))
+    if quote:
+        raise _UnmatchedQuote(line)
     return tokens
 
 
 def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     """Parse REPL command and route to the appropriate handler."""
-    parts = _tokenize_repl(cmd.strip())
+    try:
+        parts = _tokenize_repl(cmd.strip())
+    except _UnmatchedQuote:
+        skin.error("Unmatched quote in command — add the closing quote or remove it.")
+        return
     if not parts:
         return
 

@@ -9,6 +9,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+from click import UsageError
 from click.testing import CliRunner
 
 from cli_anything.siyuan.siyuan_cli import (
@@ -587,11 +588,12 @@ class TestStdinDecoding:
         monkeypatch.setenv("SIYUAN_STDIN_ENCODING", "gb18030")
         assert _read_stdin() == "毛"
 
-    def test_read_stdin_pinned_bad_encoding_falls_back(self, monkeypatch):
-        """An invalid pinned encoding falls back to utf-8-sig."""
+    def test_read_stdin_pinned_bad_encoding_errors(self, monkeypatch):
+        """An unknown pinned encoding is a usage error, not a silent fallback."""
         monkeypatch.setattr(sys, "stdin", _FakeStdin("中文".encode("utf-8")))
         monkeypatch.setenv("SIYUAN_STDIN_ENCODING", "no-such-codec")
-        assert _read_stdin() == "中文"
+        with pytest.raises(UsageError):
+            _read_stdin()
 
 
 # ── REPL delete confirmation and --file ────────────────────────────────
@@ -1078,3 +1080,15 @@ class TestReplJsonFlag:
         skin, ctx = self._dispatch('doc create nb1 /x --md "--json"')
         ctx.client.create_doc_with_md.assert_called_once_with("nb1", "/x", "--json")
         skin.error.assert_not_called()
+
+
+class TestReplUnmatchedQuote:
+    def test_unmatched_quote_rejected(self):
+        """An unclosed quote is rejected before dispatch, not run as data."""
+        skin = MagicMock()
+        ctx = MagicMock()
+        ctx.client = MagicMock()
+        ctx.session = MagicMock()
+        _dispatch_repl(skin, ctx, 'block update b1 "new text')
+        ctx.client.update_block.assert_not_called()
+        skin.error.assert_called_once()
