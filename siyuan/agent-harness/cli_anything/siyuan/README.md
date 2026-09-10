@@ -114,8 +114,8 @@ siyuan ❯ quit
 | `doc get <id>` | Get document path by ID |
 | `doc rename <id> <title>` | Rename a document |
 | `doc remove <id> --dangerous` | Delete a document (requires `--dangerous`) |
-| `block insert <data>` | Insert a block (use `-` or omit for stdin pipe) |
-| `block update <id> <data>` | Update block content (use `-` or omit for stdin pipe) |
+| `block insert <data>` | Insert a block (omit <data> to read from a stdin pipe) |
+| `block update <id> <data>` | Update block content (omit <data> to read from a stdin pipe) |
 | `block delete <id> --dangerous` | Delete a block (requires `--dangerous`) |
 | `block get <id>` | Get block kramdown source |
 | `block children <id>` | Get child blocks |

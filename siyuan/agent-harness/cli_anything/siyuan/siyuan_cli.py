@@ -37,7 +37,7 @@ def _read_stdin() -> str:
     """
     if sys.stdin.isatty():
         raise click.UsageError(
-            "stdin pipe expected (e.g. echo 'content' | sy block insert --parent pid -)"
+            "stdin pipe expected (e.g. echo 'content' | sy block insert --parent pid)"
         )
     raw = sys.stdin.buffer.read()
     pinned = os.environ.get("SIYUAN_STDIN_ENCODING", "").strip()
@@ -170,8 +170,8 @@ def _build_repl_commands() -> dict[str, str]:
         "doc list <notebook> <path>": "List documents at path",
         "doc tree <notebook>": "List full document tree",
         "doc get <id>": "Get document info by ID",
-        "block insert <parent> <data>": "Insert a block (use '-' for stdin)",
-        "block update <id> <data>": "Update a block (use '-' for stdin)",
+        "block insert <parent> <data>": "Insert a block",
+        "block update <id> <data>": "Update a block",
         "block delete <id>": "Delete a block (requires --dangerous)",
         "block get <id>": "Get block kramdown source",
         "sql <stmt>": "Execute SQL query",
@@ -419,8 +419,6 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
                 skin.error("Use either --md or --file, not both.")
                 return
             md = _read_file(file_path)
-        elif md == "-":
-            md = _read_stdin()
         nb_id = parts[2]
         doc_path = parts[3]
         doc_id = client.create_doc_with_md(nb_id, doc_path, md)
@@ -529,8 +527,6 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
                 skin.error("Provide block data either as an argument or via --file, not both.")
                 return
             data = _read_file(file_path)
-        elif has_data_arg and data == "-":
-            data = _read_stdin()
         elif not has_data_arg:
             skin.error("Provide block data either as an argument or via --file.")
             return
@@ -558,8 +554,6 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
                 skin.error("Provide block data either as an argument or via --file, not both.")
                 return
             data = _read_file(file_path)
-        elif has_data_arg and data == "-":
-            data = _read_stdin()
         elif not has_data_arg:
             skin.error("Provide block data either as an argument or via --file.")
             return
@@ -584,8 +578,6 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
                 skin.error("Provide block data either as an argument or via --file, not both.")
                 return
             data = _read_file(file_path)
-        elif has_data_arg and data == "-":
-            data = _read_stdin()
         elif not has_data_arg:
             skin.error("Provide block data either as an argument or via --file.")
             return
@@ -610,8 +602,6 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
                 skin.error("Provide block data either as an argument or via --file, not both.")
                 return
             data = _read_file(file_path)
-        elif has_data_arg and data == "-":
-            data = _read_stdin()
         elif not has_data_arg:
             skin.error("Provide block data either as an argument or via --file.")
             return
@@ -780,25 +770,20 @@ def doc():
 @doc.command("create")
 @click.argument("notebook_id")
 @click.argument("path")
-@click.option("--md", default="", help="Markdown content. Use '-' to read from stdin.")
+@click.option("--md", default="", help="Markdown content.")
 @click.option("--file", "file_path", default="", help="Read markdown content from a UTF-8 file (avoids PowerShell pipe encoding issues).")
 @click.pass_obj
 def doc_create(ctx: SiYuanContext, notebook_id: str, path: str, md: str, file_path: str):
     """Create a document with optional Markdown content.
 
-    To avoid shell escaping issues with special characters
-    (backticks, quotes, parentheses), pipe Markdown via stdin:
-      echo "## Title" | sy doc create nb1 /test --md -
-
-    On Windows, prefer --file to avoid PowerShell mangling CJK content to '?':
+    Prefer --file for content with CJK or special characters
+    (backticks, quotes, parentheses) to avoid shell escaping:
       sy doc create nb1 /test --file note.md
     """
     if file_path:
         if md:
             raise click.UsageError("Use either --md or --file, not both.")
         md = _read_file(file_path)
-    elif md == "-":
-        md = _read_stdin()
     doc_id = ctx.client.create_doc_with_md(notebook_id, path, md)
     if ctx.json_output:
         click.echo(json.dumps({"id": doc_id}, ensure_ascii=False))
@@ -898,14 +883,14 @@ def block():
 @click.option("--file", "file_path", default="", help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
 @click.pass_obj
 def block_insert(ctx: SiYuanContext, data: str | None, previous: str, parent: str, next_: str, data_type: str, file_path: str):
-    """Insert a block. Data reads from stdin when '-' or omitted."""
+    """Insert a block. Reads from stdin when no data is given (empty pipe is rejected)."""
     if not parent and not previous and not next_:
         raise click.UsageError("An anchor is required: --parent, --previous, or --next")
     if file_path:
         if data is not None:
             raise click.UsageError("Provide block data either as an argument or via --file, not both.")
         data = _read_file(file_path)
-    elif data is None or data == "-":
+    elif data is None:
         data = _read_stdin()
         if not data:
             raise click.UsageError("No block content provided: give it as an argument, via --file, or pipe a non-empty stdin.")
@@ -923,12 +908,12 @@ def block_insert(ctx: SiYuanContext, data: str | None, previous: str, parent: st
 @click.option("--file", "file_path", default="", help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
 @click.pass_obj
 def block_update(ctx: SiYuanContext, block_id: str, data: str | None, data_type: str, file_path: str):
-    """Update a block's content. Data reads from stdin when '-' or omitted."""
+    """Update a block's content. Reads from stdin when no data is given."""
     if file_path:
         if data is not None:
             raise click.UsageError("Provide block data either as an argument or via --file, not both.")
         data = _read_file(file_path)
-    elif data is None or data == "-":
+    elif data is None:
         data = _read_stdin()
         if not data:
             raise click.UsageError("No block content provided: give it as an argument, via --file, or pipe a non-empty stdin.")
