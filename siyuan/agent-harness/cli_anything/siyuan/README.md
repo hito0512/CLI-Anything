@@ -122,12 +122,19 @@ siyuan ❯ quit
 Two things differ from one-shot mode:
 
 - `--json` must be the **first** token of the line (`--json notebook list`).
-- IDs are positional and content never comes from stdin — a flag that the
-  command does not declare is an error, not content:
-  `block insert <parent_id> <data>`, `block update <block_id> <data>`,
+- IDs are positional and content never comes from stdin — a `--` prefixed token
+  is an option, so anything the command does not declare, a mistyped name
+  included, is an error rather than content:
+  `block insert <parent_id> <data> [--data-type <markdown|dom>] [--file <path>]`,
+  `block update <block_id> <data> [--data-type <markdown|dom>] [--file <path>]`,
   `doc tree <notebook> [--path <path>] [--depth N]`. The one-shot
   `insert --parent/--previous/--next` flags are not REPL options — use
   `block append` to land at the end, or `block move` to reorder.
+- `--data-type dom` stores the payload as DOM HTML instead of Markdown, in the
+  REPL exactly as one-shot.
+- `sql` and `search` take their tail as text — `sql SELECT 1 --comment` and
+  `content LIKE '--%'` are passed through, and `sql` keeps the statement's
+  quotes verbatim (the documented `sql "SELECT …"` wrapper is unwrapped).
 
 ## Command Groups
 
@@ -147,10 +154,10 @@ commands exist with the differences noted above.
 | `doc get <id>` | Get document path by ID |
 | `doc rename <id> <title>` | Rename a document |
 | `doc remove <id> --dangerous` | Delete a document (requires `--dangerous`) |
-| `block insert [<data> \| --file <path>] --parent <id>` | Insert a block (one anchor: `--parent`/`--previous`/`--next`; reads stdin when `<data>` is omitted) |
+| `block insert [<data> \| --file <path>] --parent <id>` | Insert a block (one anchor: `--parent`/`--previous`/`--next`; reads stdin when `<data>` is omitted; `--data-type dom` for DOM HTML) |
 | `block prepend <parent-id> [<data> \| --file <path>]` | Insert as the first child |
 | `block append <parent-id> [<data> \| --file <path>]` | Insert as the last child |
-| `block update <id> [<data> \| --file <path>]` | Update block content (reads stdin when `<data>` is omitted) |
+| `block update <id> [<data> \| --file <path>]` | Update block content (reads stdin when `<data>` is omitted; `--data-type dom` for DOM HTML) |
 | `block move <id> --previous <id>` | Move a block after a sibling (or `--parent <id>` to nest it) |
 | `block delete <id> --dangerous` | Delete a block (requires `--dangerous`) |
 | `block get <id>` | Get block kramdown source |

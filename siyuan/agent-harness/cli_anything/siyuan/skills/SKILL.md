@@ -88,17 +88,28 @@ Running the CLI with no command enters a REPL with the same command surface
 plus `help` and `quit`. Three differences from one-shot mode:
 
 - `--json` must be the **first** token of the line (`--json notebook list`).
-- Block/notebook/doc IDs are positional: `block insert <parent_id> <data>`,
-  `block move <id> --previous <id>`. `--previous`/`--next` are one-shot `insert`
-  options only — use `block move` to reorder afterwards.
+- Block/notebook/doc IDs are positional:
+  `block insert <parent_id> <data> [--data-type <markdown|dom>] [--file <path>]`,
+  `block move <block_id> [--previous <id> | --parent <id>]`. `--previous`/
+  `--next` are one-shot `insert` options only — use `block move` to reorder.
+  `--data-type dom` stores the payload as DOM HTML instead of Markdown.
 - No stdin pipe: content is the argument or `--file`.
 
-`--md`/`--file` values keep a literal `--json` (a flag value is data, not a switch);
-an unclosed quote, a dangling option (`--dir` with no value), a repeated option
-and a surplus positional argument are errors, as is any flag the command does not
-declare — `doc rename d1 --file x` refuses rather than retitling the document to
-`--file x`. The one-shot entry point is equally strict: `--depth 1 --depth 2` is
-rejected, not last-wins.
+`--md`/`--file` values keep a literal `--json` (a flag value is data, not a
+switch); an unclosed quote, a dangling option (`--dir` with no value), an empty
+option value (`--depth=`, `--file=`), a repeated option and a surplus positional
+argument are errors — and so is any `--` prefixed name the command does not
+declare: `doc rename d1 --file x` refuses rather than retitling the document to
+`--file x`, and a typo (`doc rename d1 --flie x`) is refused instead of becoming
+the new title. Attached values parse here too (`doc tree nb1 --depth=2`). The
+one-shot entry point is equally strict: `--depth 1 --depth 2` is rejected, not
+last-wins.
+
+`sql` and `search` are the exception — they have no option surface, so their
+tail is text: `sql SELECT 1 --comment` and `content LIKE '--%'` reach the kernel
+as written (a known flag there still errors). `sql` sends the statement
+verbatim, quotes included — write it as `sql "SELECT … WHERE x = '1'"`
+(or bare) and both spellings send the same statement.
 
 ## Agent Guidance
 

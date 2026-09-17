@@ -148,14 +148,22 @@ Both entry points reject a malformed command line instead of guessing:
 cli-anything-siyuan doc tree nb1 --depth 1 --depth 2   # option given twice
 cli-anything-siyuan doc get <doc-id> extra             # surplus positional
 cli-anything-siyuan doc rename <doc-id> --file x.md    # flag not declared here
+cli-anything-siyuan doc rename <doc-id> --flie x.md    # no such option (typo)
 cli-anything-siyuan block move <id> --previous --parent p1  # option left without a value
 ```
 
 Each of those exits 2 with the offending token and the real usage. A flag that
 the command does not declare is never taken as content, so `doc rename` cannot
-silently retitle a document to the literal text `--file x`. An option's *value*
+silently retitle a document to the literal text `--file x`; a name no command
+declares is refused the same way. An option's *value*
 is still data — `--md "--json"` writes the text `--json` — and an explicit empty
-argument stays meaningful (`block update <id> ""` clears the block).
+argument stays meaningful (`block update <id> ""` clears the block), while an
+empty *option* value (`--depth=`, `--file=`) is a usage error rather than a
+silent default: `--file=` names no file, so it must not quietly become the
+stdin pipe.
+
+Values may be attached with `=`, as on the command line:
+`doc tree nb1 --depth=2` and `block update b1 --file=note.md`.
 
 ### Block insert/prepend/append/update with multi-line content
 
@@ -164,6 +172,10 @@ a stdin pipe when the data argument is omitted (there is no `-` marker — a
 literal `-` is just data). If the bytes are neither UTF-8 nor GB18030 the pipe
 is refused rather than stored as mojibake; pin the code page with
 `SIYUAN_STDIN_ENCODING` or pass `--file`.
+
+`--data-type dom` sends the payload as DOM HTML instead of Markdown. It works in
+both entry points and defaults to `markdown`; it is not a content slot, so a
+missing value is an error rather than the next flag (`--data-type --json`).
 
 ```bash
 # Pipe multi-line content
@@ -279,20 +291,46 @@ Both entry points reach the same commands, with three deliberate differences:
   matching the one-shot `sy --json …` position. A `--json` anywhere else is an
   error, not content.
 - Block/notebook/doc **IDs are positional** in the REPL:
-  `block insert <parent_id> <data>`, `block move <id> --previous <id>`,
+  `block insert <parent_id> <data> [--data-type <markdown|dom>] [--file <path>]`,
+  `block update <block_id> <data> [--data-type <markdown|dom>] [--file <path>]`,
+  `block move <block_id> [--previous <id> | --parent <id>]`,
   `doc tree <notebook> [--path <path>] [--depth N]`. The one-shot `insert`
   `--parent/--previous/--next` flags are not REPL options; a stray anchor flag is
   rejected (it used to be swallowed into the block content) — use `block move`
   to reorder after inserting.
 - The REPL has no stdin pipe: content is the argument or `--file`.
 
-Option values that are missing, repeated, or are themselves flags
+Option values that are missing, repeated, empty, or are themselves flags
 (`--previous --parent p1`) are errors, and an explicit empty value is still
 meaningful (`block update b1 ""` clears the block).
 
-A flag the command does not declare is an error, never content — `doc rename d1
---file x` refuses instead of retitling the document to `--file x`, and `doc list
---depth 2` refuses instead of querying the path `--depth`. The `help` listing is
-the single source for every signature, so the hint in an error is the same text
-`help` prints.
+A `--` prefixed token is an option wherever it appears, and one no command
+declares is an error, not text: `doc rename d1 --file x` refuses instead of
+retitling the document to `--file x`, `doc list --depth 2` refuses instead of
+querying the path `--depth`, and a typo (`doc rename d1 --flie x`, which used to
+retitle the document to `--flie x`) is reported as an unknown option. Attached
+values work here too (`doc tree nb1 --depth=2`), and one-shot and REPL parse
+both spellings identically.
+
+The two **free-text commands are the exception**: `sql <stmt>` and
+`search <query>` have no option surface, so a flag-shaped token there is text —
+a SQL comment (`sql SELECT 1 --comment`) or a LIKE pattern
+(`content LIKE '--%'`) has no other spelling, since there is no `--` terminator
+to escape it. A *known* flag is still refused in those commands (a misplaced
+`--depth` is a mistake), but a name nothing declares is passed through.
+
+**`sql` keeps the statement verbatim**, quotes included: the tokens are only
+used to validate flags, and the text sent on is the line as typed. Writing
+`WHERE '1' = '01'` without the wrapper used to reach the kernel as
+`WHERE 1 = 01` — a different query with a different answer. The documented
+spelling wraps the statement in quotes (`sql "SELECT … LIKE '%k%'"`); that one
+outer pair is unwrapped, so both spellings send the same statement.
+
+A bare `--` is not a terminator: in `sql`/`search` it stays part of the text
+(`sql -- SELECT 1`), and in a fixed-arity command it is refused
+(`doc get -- d1` used to fetch the id `--` and drop `d1`). Variadic block
+content keeps it (`block update b1 a -- b`).
+
+The `help` listing is the single source for every signature, so the hint in an
+error is the same text `help` prints.
 
