@@ -115,14 +115,15 @@ def _single_use(fallback: Any) -> Any:
     return callback
 
 
-def _resolve_block_data(data: str | None, file_path: str) -> str:
+def _resolve_block_data(data: str | None, file_path: str | None) -> str:
     """Resolve block content from the argument, --file, or a stdin pipe.
 
     Exactly one source is used; an explicit empty argument is content (it
     clears the block), while an absent one falls through to the pipe and is
-    rejected when that is empty too.
+    rejected when that is empty too. `--file` is checked for presence, not
+    truthiness: `--file=` names no file and must not quietly become the pipe.
     """
-    if file_path:
+    if file_path is not None:
         if data is not None:
             raise click.UsageError(
                 "Provide block data either as an argument or via --file, not both.")
@@ -276,11 +277,11 @@ def _build_repl_commands() -> dict[str, str]:
         "doc get <id>": "Get document path by ID",
         "doc rename <id> <title>": "Rename a document",
         "doc remove <id> --dangerous": "Remove a document (destructive)",
-        "block insert <parent_id> <data>": "Insert a block; content is <data> or --file",
-        "block prepend <parent_id> <data>": "Insert as the first child",
-        "block append <parent_id> <data>": "Insert as the last child",
-        "block update <block_id> <data>": "Update a block; content is <data> or --file",
-        "block move <block_id> --previous <id>": "Move a block (--previous or --parent)",
+        "block insert <parent_id> <data> [--data-type <markdown|dom>] [--file <path>]": "Insert a block; content is <data> or --file",
+        "block prepend <parent_id> <data> [--data-type <markdown|dom>] [--file <path>]": "Insert as the first child",
+        "block append <parent_id> <data> [--data-type <markdown|dom>] [--file <path>]": "Insert as the last child",
+        "block update <block_id> <data> [--data-type <markdown|dom>] [--file <path>]": "Update a block; content is <data> or --file",
+        "block move <block_id> [--previous <id> | --parent <id>]": "Move a block (one destination)",
         "block delete <block_id> --dangerous": "Delete a block (destructive)",
         "block get <block_id>": "Get block kramdown source",
         "block children <block_id>": "Get child blocks",
@@ -376,8 +377,50 @@ _REPL_KNOWN_FLAGS = frozenset({
 # flag-shaped value is still data (`--md "--json"` writes the literal text);
 # the rest treat a flag-shaped value as a dangling option instead.
 _REPL_CONTENT_FLAGS = frozenset({"--md", "--file"})
-_REPL_STRICT_VALUE_FLAGS = frozenset({"--dir", "--path", "--depth", "--previous", "--parent"})
+_REPL_STRICT_VALUE_FLAGS = frozenset({
+    "--dir", "--path", "--depth", "--previous", "--parent", "--data-type",
+})
+# Every flag that takes a value, which is also the set click's `--flag=value`
+# spelling applies to.
 _REPL_VALUE_FLAGS = _REPL_CONTENT_FLAGS | _REPL_STRICT_VALUE_FLAGS
+
+# Commands whose arguments are free text rather than an option surface. Every
+# token after the command reaches the kernel verbatim, so a flag-shaped one is
+# not an option there: a SQL comment (`SELECT 1 --comment`) or a LIKE pattern
+# (`content LIKE '--foo%'`) has no other spelling — there is no `--` terminator
+# to escape it. Known flags still error in these commands (a misplaced
+# `--depth` is a mistake), so only the unknown-name check is lifted.
+_REPL_FREE_TEXT_COMMANDS = frozenset({"sql", "search"})
+
+
+def _is_flag_token(token: str) -> bool:
+    """True when a token names an option rather than being content.
+
+    A bare `--` is not: the REPL has no `--` terminator, so it stays part of a
+    SQL statement (`sql -- SELECT 1`). Anything longer after the dashes names
+    something, and a name nothing declares is a typo, never text.
+    """
+    return token.startswith("--") and len(token) > 2
+
+
+def _normalize_flag_assignments(parts: list[str]) -> list[str]:
+    """Split click's `--flag=value` spelling into two tokens.
+
+    click accepts an attached value on the command line, so the REPL has to
+    accept it too: read as one bare word it fell into a positional slot and was
+    written into the notebook (`block update b1 --file=x.md` stored the literal
+    text `--file=x.md`, `doc create nb1 /p --md=hi` created an empty document).
+    Only a value-taking flag is split, so a flag-shaped *value* stays whole.
+    """
+    out: list[str] = []
+    for token in parts:
+        head, sep, value = token.partition("=")
+        if sep and head in _REPL_VALUE_FLAGS:
+            out.extend((head, value))
+        else:
+            out.append(token)
+    return out
+
 
 # "<command>" or "<command> <verb>" -> the flags that command declares
 _REPL_ALLOWED_FLAGS: dict[str, frozenset[str]] = {
@@ -385,10 +428,10 @@ _REPL_ALLOWED_FLAGS: dict[str, frozenset[str]] = {
     "doc create": frozenset({"--md", "--file"}),
     "doc tree": frozenset({"--path", "--depth"}),
     "doc remove": frozenset({"--dangerous"}),
-    "block insert": frozenset({"--file"}),
-    "block prepend": frozenset({"--file"}),
-    "block append": frozenset({"--file"}),
-    "block update": frozenset({"--file"}),
+    "block insert": frozenset({"--file", "--data-type"}),
+    "block prepend": frozenset({"--file", "--data-type"}),
+    "block append": frozenset({"--file", "--data-type"}),
+    "block update": frozenset({"--file", "--data-type"}),
     "block delete": frozenset({"--dangerous"}),
     "block move": frozenset({"--previous", "--parent"}),
     "asset upload": frozenset({"--dir"}),
@@ -549,7 +592,14 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     if not parts:
         return
 
+    # click accepts `--flag=value`, so the REPL does too. The free-text commands
+    # are exempt: their tail is one argument, and a SQL fragment such as
+    # `content = '--file=y'` must not be split into options.
+    if parts[0] not in _REPL_FREE_TEXT_COMMANDS:
+        parts = _normalize_flag_assignments(parts)
+
     value_idx: set[int] = set()
+    dangling: list[str] = []
     j = 0
     while j < len(parts) - 1:
         if parts[j] not in _REPL_VALUE_FLAGS:
@@ -559,8 +609,16 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
             j += 2
         else:
             # Dangling: `--previous --parent p1` must not eat "--parent", or
-            # "p1" is left looking like a stray positional.
+            # "p1" is left looking like a stray positional. Reported before the
+            # checks below so the nearest cause wins over the flag it collided
+            # with: `--data-type --json` is a missing value, not a misplaced
+            # `--json`.
+            if parts[j] in _REPL_STRICT_VALUE_FLAGS:
+                dangling.append(parts[j])
             j += 1
+    if dangling:
+        skin.error(f"Option {dangling[0]} requires a value.")
+        return
     stray = {p for k, p in enumerate(parts) if k not in value_idx}
     if "--json" in stray:
         skin.error("--json must come before the command (e.g. `--json notebook list`)")
@@ -582,21 +640,40 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
                  if not (k not in value_idx and p == "--dangerous")]
         stray = stray - {"--dangerous"}
 
+    # A flag is an option wherever it appears, so a name this command does not
+    # declare is a mistake, never content — whether the command knows the flag
+    # at all (`doc list nb1 --depth 2` queried the path "--depth") or the token
+    # is a typo (`doc rename d1 --flie x` retitled the document to "--flie x").
     misplaced = sorted(p for p in stray
-                       if p in _REPL_KNOWN_FLAGS and p not in allowed)
+                       if _is_flag_token(p) and p in _REPL_KNOWN_FLAGS
+                       and p not in allowed)
     if misplaced:
         hint = f" (accepts {', '.join(sorted(allowed))})" if allowed else ""
-        signature = _repl_signature(key)
         skin.error(f"{misplaced[0]} is not an option here{hint}. "
-                   f"Usage: {signature or key}")
+                   f"Usage: {_repl_signature(key) or key}")
+        return
+    unknown = [] if command in _REPL_FREE_TEXT_COMMANDS else sorted(
+        p for p in stray if _is_flag_token(p) and p not in _REPL_KNOWN_FLAGS)
+    if unknown:
+        skin.error(f"Unknown option: {unknown[0]}. "
+                   f"Usage: {_repl_signature(key) or key}")
         return
 
     # Fixed-arity commands reject leftover positionals: `doc list nb1 a b` and
-    # `doc get d1 extra` used to drop the extra argument without a word.
+    # `doc get d1 extra` used to drop the extra argument without a word. The
+    # filter has to agree with `_is_flag_token`, or a bare `--` is dropped from
+    # the count while the handler still reads it as the argument itself.
     limit = _REPL_MAX_POSITIONALS.get(key)
     if limit is not None:
         positionals = [p for k, p in enumerate(parts)
-                       if k not in value_idx and not p.startswith("--")]
+                       if k not in value_idx and not _is_flag_token(p)]
+        # The REPL has no `--` terminator, so one here can only be a mistake:
+        # `doc list -- nb1` listed the notebook named "--". Variadic commands
+        # keep it as content (`block update b1 a -- b`).
+        if "--" in positionals:
+            skin.error(f"A bare `--` is not a terminator here. "
+                       f"Usage: {_repl_signature(key) or key}")
+            return
         extra = positionals[1 + (1 if verb else 0) + limit:]
         if extra:
             skin.error(f"Unexpected argument: {extra[0]}. "
@@ -615,9 +692,9 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
         elif command == "attr":
             _handle_attr_repl(skin, client, parts, json_mode)
         elif command == "sql":
-            _handle_sql_repl(skin, client, parts, json_mode)
+            _handle_sql_repl(skin, client, _free_text_remainder(cmd, command), json_mode)
         elif command == "search":
-            _handle_search_repl(skin, client, parts, json_mode)
+            _handle_search_repl(skin, client, _free_text_remainder(cmd, command), json_mode)
         elif command == "tag":
             _handle_tag_repl(skin, client, parts, json_mode)
         elif command == "version":
@@ -697,48 +774,26 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
         return
     sub = parts[1]
     if sub == "create" and len(parts) >= 4:
-        # Parse --md/--file and strip both flags with their values in a single
-        # pass so behavior does not depend on argument order (Codex review).
-        md: str | None = None
-        file_path: str | None = None
-        stripped: list[str] = []
-        i = 0
-        while i < len(parts):
-            p = parts[i]
-            if p in ("--md", "--file"):
-                if i + 1 >= len(parts):
-                    skin.error(f"Option {p} requires a value.")
-                    return
-                if p == "--md":
-                    if md is not None:
-                        skin.error("Option --md is given more than once.")
-                        return
-                    md = parts[i + 1]
-                else:
-                    if file_path is not None:
-                        skin.error("Option --file is given more than once.")
-                        return
-                    file_path = parts[i + 1]
-                i += 2  # skip flag and its value
-            else:
-                stripped.append(p)
-                i += 1
-        parts = stripped
+        parsed = _parse_repl_content_source(parts, 2, skin, ("--md", "--file"))
+        if parsed is None:
+            return
+        rest, values = parsed
         # Stripping --md/--file may have removed the positionals themselves
         # (e.g. `doc create nb1 --file note.md`); recheck before indexing.
-        if len(parts) < 4:
+        if len(rest) < 2:
             skin.error(f"Usage: {_repl_signature('doc create')}")
             return
         # Presence, not truthiness: `--md "" --file note.md` gave both sources
         # and used to pick the file without saying so.
-        if md is not None and file_path is not None:
+        if "--md" in values and "--file" in values:
             skin.error("Use either --md or --file, not both.")
             return
-        if file_path is not None:
-            md = _read_file(file_path)
-        nb_id = parts[2]
-        doc_path = parts[3]
-        doc_id = client.create_doc_with_md(nb_id, doc_path, md or "")
+        content = values.get("--md", "")
+        if "--file" in values:
+            content = _read_file(values["--file"])
+        nb_id = rest[0]
+        doc_path = rest[1]
+        doc_id = client.create_doc_with_md(nb_id, doc_path, content)
         session.update(current_doc_id=doc_id, current_doc_path=doc_path)
         if json_mode:
             click.echo(json.dumps({"id": doc_id}, ensure_ascii=False))
@@ -798,44 +853,66 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
         _repl_reject(skin, f"doc {sub}", f"Unknown doc command: {sub}")
 
 
-def _parse_repl_content_source(parts: list[str], start: int, skin: Any) -> tuple[list[str], str] | None:
-    """Split parts[start:] into (positionals, file_path).
+def _parse_repl_content_source(parts: list[str], start: int, skin: Any,
+                               flags: tuple[str, ...] = ("--file",),
+                               ) -> tuple[list[str], dict[str, str]] | None:
+    """Split parts[start:] into (positionals, option values).
 
-    `--file <path>` is an option anywhere in the content slot; every other token
-    is literal content. No `--` terminator and no quoting trick.
+    `flags` are the options the command declares. Each is an option anywhere in
+    the content slot and takes the next token as its value, so that value is
+    literal data (`--md "--json"` writes the text) when the flag carries content.
+    A strict value-taking flag is not a content slot though: its value must be a
+    real token (`--data-type --json` is a missing value, not the type "--json").
+    Every other token, including a flag-shaped one, is content. Returns None
+    after reporting a dangling or repeated option, which the caller must not
+    guess around.
     """
     rest: list[str] = []
-    file_path = ""
+    values: dict[str, str] = {}
     i = start
     while i < len(parts):
         p = parts[i]
-        if p == "--file":
-            if i + 1 >= len(parts):
-                skin.error("Option --file requires a value.")
-                return None
-            if file_path:
-                skin.error("Option --file is given more than once.")
-                return None
-            file_path = parts[i + 1]
-            i += 2
-        else:
+        if p not in flags:
             rest.append(p)
             i += 1
-    return rest, file_path
+            continue
+        if i + 1 >= len(parts):
+            skin.error(f"Option {p} requires a value.")
+            return None
+        value = parts[i + 1]
+        # A strict option's value is a value, not more options and not nothing:
+        # `--previous --parent p1` must not read "--parent" as an ID, and an
+        # empty one (`--data-type=`) must not fall through to the default. A
+        # content option keeps its literal value, empty included, because an
+        # explicit empty argument is meaningful there.
+        if p in _REPL_STRICT_VALUE_FLAGS and (not value or _is_flag_token(value)):
+            skin.error(f"Option {p} requires a value.")
+            return None
+        if p in values:
+            skin.error(f"Option {p} is given more than once.")
+            return None
+        values[p] = value
+        i += 2
+    return rest, values
 
 
 def _parse_repl_block_write(parts: list[str], skin: Any,
-                            usage: str) -> tuple[str, str] | None:
-    """Parse `<block_id> [<data> | --file <path>]` for the block write commands.
+                            usage: str) -> tuple[str, str, str] | None:
+    """Parse `<block_id> [<data> | --file <path>] [--data-type <type>]`.
 
-    Returns (target_id, data), or None after reporting the error. A stray flag
-    never gets this far: `_dispatch_repl` rejects a flag the command does not
-    declare before dispatching, so an anchor cannot be swallowed as content.
+    Returns (target_id, data, data_type), or None after reporting the error. A
+    stray flag never gets this far: `_dispatch_repl` rejects a flag the command
+    does not declare before dispatching, so an anchor cannot be swallowed as
+    content.
     """
-    parsed = _parse_repl_content_source(parts, 2, skin)
+    parsed = _parse_repl_content_source(parts, 2, skin, ("--file", "--data-type"))
     if parsed is None:
         return None
-    rest, file_path = parsed
+    rest, values = parsed
+    file_path = values.get("--file", "")
+    # Presence, not truthiness: the parser already refused an empty value, so a
+    # missing key is the only way to get the default.
+    data_type = values.get("--data-type", "markdown")
     if not rest:
         skin.error(f"Usage: {usage}")
         return None
@@ -854,7 +931,7 @@ def _parse_repl_block_write(parts: list[str], skin: Any,
     elif not has_data_arg:
         skin.error("Provide block data either as an argument or via --file.")
         return None
-    return target_id, data
+    return target_id, data, data_type
 
 
 def _repl_opt(tokens: list[str], name: str) -> str:
@@ -862,15 +939,18 @@ def _repl_opt(tokens: list[str], name: str) -> str:
 
     Raises UsageError when the flag is dangling, repeated, or its value is
     itself a flag: `--previous --parent p1` must not read "--parent" as an ID.
+    An empty value (`--depth=` gave one) is rejected too — the caller treats
+    "" as "not given" and would fall back to its default in silence.
     """
     if name not in tokens:
         return ""
     if tokens.count(name) > 1:
         raise click.UsageError(f"Option {name} is given more than once.")
     i = tokens.index(name)
-    if i + 1 >= len(tokens) or tokens[i + 1].startswith("--"):
+    value = tokens[i + 1] if i + 1 < len(tokens) else ""
+    if not value or value.startswith("--"):
         raise click.UsageError(f"Option {name} requires a value.")
-    return tokens[i + 1]
+    return value
 
 
 def _repl_int(tokens: list[str], name: str, default: int) -> int:
@@ -896,27 +976,27 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
         parsed = _parse_repl_block_write(parts, skin, usage)
         if parsed is None:
             return
-        target_id, data = parsed
+        target_id, data, data_type = parsed
         if sub == "insert":
-            result = client.insert_block("markdown", data, parent_id=target_id)
+            result = client.insert_block(data_type, data, parent_id=target_id)
             if json_mode:
                 click.echo(json.dumps(result, ensure_ascii=False))
             else:
                 skin.success("Block inserted")
         elif sub == "prepend":
-            result = client.prepend_block("markdown", data, target_id)
+            result = client.prepend_block(data_type, data, target_id)
             if json_mode:
                 click.echo(json.dumps(result, ensure_ascii=False))
             else:
                 skin.success("Block prepended")
         elif sub == "append":
-            result = client.append_block("markdown", data, target_id)
+            result = client.append_block(data_type, data, target_id)
             if json_mode:
                 click.echo(json.dumps(result, ensure_ascii=False))
             else:
                 skin.success("Block appended")
         else:
-            client.update_block("markdown", data, target_id)
+            client.update_block(data_type, data, target_id)
             if json_mode:
                 click.echo(json.dumps({"updated": target_id}, ensure_ascii=False))
             else:
@@ -1046,12 +1126,40 @@ def _handle_attr_repl(skin: Any, client: SiYuanClient,
         _repl_reject(skin, f"attr {sub}", f"Unknown attr command: {sub}")
 
 
+def _free_text_remainder(line: str, command: str) -> str:
+    """The rest of the line after the command, exactly as typed.
+
+    Tokenizing drops the quotes a statement needs — `WHERE '1' = '01'` reached
+    the kernel as `WHERE 1 = 01`, a different query with a different answer.
+    The token list is still used to validate flags; only the text sent on is
+    taken verbatim.
+
+    The documented spelling wraps the whole statement in quotes
+    (`sql "SELECT … LIKE '%k%'"`), so one wrapping pair is unwrapped the way the
+    tokenizer used to — but only when the remainder really is that single
+    quoted token, never for `"a" || "b"`.
+    """
+    text = line.strip()
+    if text.startswith("--json"):
+        text = text[len("--json"):].lstrip()
+    if not text.startswith(command):
+        return ""  # unreachable: the tokenizer found this command first
+    text = text[len(command):].lstrip()
+    if len(text) > 1 and text[0] in "\"'" and text[-1] == text[0]:
+        try:
+            tokens = _tokenize_repl(text)
+        except _UnmatchedQuote:
+            return text
+        if len(tokens) == 1 and tokens[0] == text[1:-1]:
+            return tokens[0]
+    return text
+
+
 def _handle_sql_repl(skin: Any, client: SiYuanClient,
-                     parts: list[str], json_mode: bool) -> None:
-    if len(parts) < 2:
+                     stmt: str, json_mode: bool) -> None:
+    if not stmt:
         skin.error(f"Usage: {_repl_signature('sql')}")
         return
-    stmt = " ".join(parts[1:])
     results = client.query_sql(stmt)
     if json_mode:
         click.echo(json.dumps(results, ensure_ascii=False))
@@ -1064,11 +1172,10 @@ def _handle_sql_repl(skin: Any, client: SiYuanClient,
 
 
 def _handle_search_repl(skin: Any, client: SiYuanClient,
-                        parts: list[str], json_mode: bool) -> None:
-    if len(parts) < 2:
+                        query: str, json_mode: bool) -> None:
+    if not query:
         skin.error(f"Usage: {_repl_signature('search')}")
         return
-    query = " ".join(parts[1:])
     data = client.search_blocks(query)
     blocks = data.get("blocks", []) if isinstance(data, dict) else data
     matched = data.get("matchedBlockCount") if isinstance(data, dict) else None
@@ -1330,9 +1437,9 @@ def block():
 @click.option("--parent", multiple=True, default=None, callback=_single_use(""), help="Parent block ID")
 @click.option("--next", "next_", multiple=True, default=None, callback=_single_use(""), help="Next block ID")
 @click.option("--data-type", multiple=True, default=None, callback=_single_use("markdown"), help="Data type (markdown/dom)")
-@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(""), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
+@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(None), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
 @click.pass_obj
-def block_insert(ctx: SiYuanContext, data: str | None, previous: str, parent: str, next_: str, data_type: str, file_path: str):
+def block_insert(ctx: SiYuanContext, data: str | None, previous: str, parent: str, next_: str, data_type: str, file_path: str | None):
     """Insert a block. Reads from stdin when no data is given (empty pipe is rejected).
 
     Give exactly one anchor: --parent, --previous or --next. With two the
@@ -1361,9 +1468,9 @@ def block_insert(ctx: SiYuanContext, data: str | None, previous: str, parent: st
 @click.argument("parent_id")
 @click.argument("data", required=False)
 @click.option("--data-type", multiple=True, default=None, callback=_single_use("markdown"), help="Data type (markdown/dom)")
-@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(""), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
+@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(None), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
 @click.pass_obj
-def block_prepend(ctx: SiYuanContext, parent_id: str, data: str | None, data_type: str, file_path: str):
+def block_prepend(ctx: SiYuanContext, parent_id: str, data: str | None, data_type: str, file_path: str | None):
     """Insert a block as the first child of a container block. Reads from stdin when no data is given."""
     data = _resolve_block_data(data, file_path)
     result = ctx.client.prepend_block(data_type, data, parent_id)
@@ -1377,9 +1484,9 @@ def block_prepend(ctx: SiYuanContext, parent_id: str, data: str | None, data_typ
 @click.argument("parent_id")
 @click.argument("data", required=False)
 @click.option("--data-type", multiple=True, default=None, callback=_single_use("markdown"), help="Data type (markdown/dom)")
-@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(""), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
+@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(None), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
 @click.pass_obj
-def block_append(ctx: SiYuanContext, parent_id: str, data: str | None, data_type: str, file_path: str):
+def block_append(ctx: SiYuanContext, parent_id: str, data: str | None, data_type: str, file_path: str | None):
     """Insert a block as the last child of a container block. Reads from stdin when no data is given."""
     data = _resolve_block_data(data, file_path)
     result = ctx.client.append_block(data_type, data, parent_id)
@@ -1393,9 +1500,9 @@ def block_append(ctx: SiYuanContext, parent_id: str, data: str | None, data_type
 @click.argument("block_id")
 @click.argument("data", required=False)
 @click.option("--data-type", multiple=True, default=None, callback=_single_use("markdown"), help="Data type")
-@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(""), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
+@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(None), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
 @click.pass_obj
-def block_update(ctx: SiYuanContext, block_id: str, data: str | None, data_type: str, file_path: str):
+def block_update(ctx: SiYuanContext, block_id: str, data: str | None, data_type: str, file_path: str | None):
     """Update a block's content. Reads from stdin when no data is given."""
     data = _resolve_block_data(data, file_path)
     ctx.client.update_block(data_type, data, block_id)

@@ -244,7 +244,7 @@ MISPLACED_FLAGS = [
     ("attr unset b1 --md", "set_block_attrs"),
     ("doc list nb1 --depth 2", "list_docs_by_path"),
     ("doc list nb1 --path /x", "list_docs_by_path"),
-    ("block update b1 hi --data-type dom", "update_block"),
+    ("doc rename d1 --data-type dom", "rename_doc_by_id"),
     ("doc tree nb1 --previous x", "list_doc_tree"),
 ]
 
@@ -269,6 +269,130 @@ def test_unrelated_command_rejects_dangerous(env):
     assert "not an option here" in str(skin.error.call_args)
     # The hint must be the real signature, not the flag echoed back as one.
     assert "Usage: search <query>" in str(skin.error.call_args)
+
+
+# ── a name no command declares is a typo, never content ───────────────
+
+UNKNOWN_FLAGS = [
+    ("doc rename d1 --flie x", "rename_doc_by_id"),
+    ("notebook create --nalme x", "create_notebook"),
+    ("doc get d1 --depht 2", "get_hpath_by_id"),
+    ("block delete b1 --dangerus", "delete_block"),
+]
+
+
+@pytest.mark.parametrize("cmd,fn", UNKNOWN_FLAGS)
+def test_unknown_flag_is_rejected(env, cmd, fn):
+    """A mistyped flag used to be written into the target as literal text.
+
+    `doc rename d1 --flie x` really renamed the document to "--flie x"; the
+    one-shot command answers "No such option".
+    """
+    skin, ctx, _ = run(env, cmd)
+    getattr(ctx.client, fn).assert_not_called()
+    assert "Unknown option" in str(skin.error.call_args)
+
+
+def test_unknown_flag_reports_the_signature(env):
+    skin, _, _ = run(env, "doc rename d1 --flie x")
+    assert "Usage: doc rename <id> <title>" in str(skin.error.call_args)
+
+
+def test_double_dash_inside_content_is_kept(env):
+    """`--` is not an option — the REPL has no `--` terminator to strip."""
+    _, ctx, _ = run(env, "block update b1 a -- b")
+    ctx.client.update_block.assert_called_once_with("markdown", "a -- b", "b1")
+
+
+# ── click's `--flag=value` spelling parses in the REPL too ────────────
+
+def test_attached_value_updates_the_block(env, tmp_path):
+    """`block update b1 --file=x.md` used to write the flag itself as content."""
+    note = tmp_path / "note.md"
+    note.write_text("from file", encoding="utf-8")
+    _, ctx, _ = run(env, f"block update b1 --file={note}")
+    ctx.client.update_block.assert_called_once_with("markdown", "from file", "b1")
+
+
+def test_attached_value_reaches_doc_create(env):
+    """`doc create nb1 /p --md=hi` used to create an empty document, silently."""
+    _, ctx, _ = run(env, "doc create nb1 /p --md=hi")
+    ctx.client.create_doc_with_md.assert_called_once_with("nb1", "/p", "hi")
+
+
+def test_attached_values_reach_doc_tree(env):
+    """Both options used to be dropped, falling back to "/" and no depth."""
+    _, ctx, _ = run(env, "doc tree nb1 --depth=2 --path=/a")
+    ctx.client.list_doc_tree.assert_called_once_with("nb1", path="/a", max_depth=2)
+
+
+def test_attached_value_reaches_asset_upload(env, tmp_path):
+    """`--dir=/x/` used to be read as a file name ("File not found")."""
+    src = tmp_path / "pic.png"
+    src.write_bytes(b"p")
+    _, ctx, _ = run(env, f"asset upload {src} --dir=/assets/x/")
+    ctx.client.upload_asset.assert_called_once_with([str(src)],
+                                                    assets_dir_path="/assets/x/")
+
+
+# ── --data-type is a REPL option, as it is one-shot ───────────────────
+
+BLOCK_WRITES = [
+    ("block insert p1 hi --data-type dom", "insert_block"),
+    ("block prepend p1 hi --data-type dom", "prepend_block"),
+    ("block append p1 hi --data-type=dom", "append_block"),
+    ("block update b1 hi --data-type=dom", "update_block"),
+]
+
+
+@pytest.mark.parametrize("cmd,fn", BLOCK_WRITES)
+def test_data_type_reaches_the_kernel(env, cmd, fn):
+    """`--data-type dom` used to be refused as "not an option here".
+
+    The type was hard-coded to "markdown", so a DOM payload was stored as
+    markdown text — the one-shot command has always accepted the flag. The flag
+    and its value are options, not block content.
+    """
+    _, ctx, _ = run(env, cmd)
+    assert getattr(ctx.client, fn).call_args.args[:2] == ("dom", "hi")
+
+
+def test_data_type_defaults_to_markdown(env):
+    """Absent flag keeps the one-shot default."""
+    _, ctx, _ = run(env, "block update b1 hi")
+    ctx.client.update_block.assert_called_once_with("markdown", "hi", "b1")
+
+
+def test_data_type_without_a_value_is_rejected(env):
+    """`--data-type --json` must not store the type "--json"."""
+    skin, ctx, _ = run(env, "block update b1 hi --data-type --json")
+    ctx.client.update_block.assert_not_called()
+    assert "requires a value" in str(skin.error.call_args)
+
+
+def test_data_type_repeated_is_rejected(env):
+    skin, ctx, _ = run(env, "block update b1 hi --data-type dom --data-type md")
+    ctx.client.update_block.assert_not_called()
+    assert "more than once" in str(skin.error.call_args)
+
+
+def test_only_the_first_equals_splits(env):
+    """The value may itself contain `=`, as on the command line."""
+    _, ctx, _ = run(env, "doc create nb1 /p --md=a=b")
+    ctx.client.create_doc_with_md.assert_called_once_with("nb1", "/p", "a=b")
+
+
+def test_attached_empty_value_is_rejected(env):
+    """`--depth=` is an empty value, not a missing option: no silent default."""
+    skin, ctx, _ = run(env, "doc tree nb1 --depth=")
+    ctx.client.list_doc_tree.assert_not_called()
+    assert "--depth requires a value" in str(skin.error.call_args)
+
+
+def test_attached_unknown_flag_is_still_rejected(env):
+    skin, ctx, _ = run(env, "block update b1 --flie=x")
+    ctx.client.update_block.assert_not_called()
+    assert "Unknown option" in str(skin.error.call_args)
 
 
 # ── missing arguments report a usage, not an internal error ───────────
@@ -475,6 +599,93 @@ def test_doc_create_empty_md_alone_is_an_empty_doc(env):
     ctx.client.create_doc_with_md.assert_called_once_with("nb1", "/p", "")
 
 
+# ── free-text commands: the tail is text, not an option surface ───────
+
+FREE_TEXT = [
+    ("sql SELECT 1 --comment", "query_sql", "SELECT 1 --comment"),
+    ("sql SELECT id FROM blocks WHERE content LIKE '--%' LIMIT 1",
+     "query_sql", "SELECT id FROM blocks WHERE content LIKE '--%' LIMIT 1"),
+    ("sql SELECT * FROM blocks WHERE content = '--file=x'",
+     "query_sql", "SELECT * FROM blocks WHERE content = '--file=x'"),
+    ("search --foo", "search_blocks", "--foo"),
+    ("search -- alpha", "search_blocks", "-- alpha"),
+    ("sql -- SELECT 1", "query_sql", "-- SELECT 1"),
+]
+
+
+@pytest.mark.parametrize("cmd,fn,expected", FREE_TEXT)
+def test_free_text_keeps_flag_shaped_text(env, cmd, fn, expected):
+    """A SQL comment or LIKE pattern has no other spelling — there is no `--`
+    terminator to escape it, so the tail must reach the kernel verbatim."""
+    skin, ctx, _ = run(env, cmd)
+    getattr(ctx.client, fn).assert_called_once_with(expected)
+    skin.error.assert_not_called()
+
+
+def test_known_flag_still_errors_in_a_free_text_command(env):
+    """The exemption is only for names nothing declares."""
+    skin, ctx, _ = run(env, "sql select --depth from x")
+    ctx.client.query_sql.assert_not_called()
+    assert "not an option here" in str(skin.error.call_args)
+
+
+def test_unknown_flag_still_errors_in_a_structured_command(env):
+    skin, ctx, _ = run(env, "doc rename d1 --flie x")
+    ctx.client.rename_doc_by_id.assert_not_called()
+    assert "Unknown option" in str(skin.error.call_args)
+
+
+# ── a statement keeps its quotes ──────────────────────────────────────
+
+def test_sql_keeps_inner_quotes(env):
+    """`WHERE '1' = '01'` used to reach the kernel as `WHERE 1 = 01`.
+
+    That is a different query — it returns a row where the text comparison
+    returns none — and nothing said so.
+    """
+    _, ctx, _ = run(env, "sql SELECT type FROM blocks WHERE '1' = '01' LIMIT 1")
+    ctx.client.query_sql.assert_called_once_with(
+        "SELECT type FROM blocks WHERE '1' = '01' LIMIT 1")
+
+
+def test_sql_unwraps_one_wrapping_quote_pair(env):
+    """The documented spelling wraps the statement; its quotes are not sent on."""
+    _, ctx, _ = run(env, """sql "SELECT * FROM blocks WHERE content LIKE '%k%'" """.strip())
+    ctx.client.query_sql.assert_called_once_with(
+        "SELECT * FROM blocks WHERE content LIKE '%k%'")
+
+
+def test_sql_does_not_unwrap_a_quoted_expression(env):
+    """`"a" || "b"` starts and ends with a quote but is not one quoted token."""
+    _, ctx, _ = run(env, 'sql "a" || "b"')
+    ctx.client.query_sql.assert_called_once_with('"a" || "b"')
+
+
+# ── a bare `--` is not an argument either ─────────────────────────────
+
+@pytest.mark.parametrize("cmd,fn", [
+    ("doc get -- d1", "get_hpath_by_id"),
+    ("block get -- b1", "get_block_kramdown"),
+    ("doc list -- nb1", "list_docs_by_path"),
+    ("version --", "get_version"),
+])
+def test_bare_terminator_is_not_read_as_the_argument(env, cmd, fn):
+    """`doc get -- d1` used to fetch the id "--" and drop `d1`.
+
+    There is no `--` terminator to strip, so in a fixed-arity command it is
+    refused rather than filling an argument slot.
+    """
+    skin, ctx, _ = run(env, cmd)
+    getattr(ctx.client, fn).assert_not_called()
+    assert "not a terminator" in str(skin.error.call_args)
+
+
+def test_bare_terminator_in_a_block_write_is_still_content(env):
+    """Block content is variadic, so `--` there stays text."""
+    _, ctx, _ = run(env, "block update b1 a -- b")
+    ctx.client.update_block.assert_called_once_with("markdown", "a -- b", "b1")
+
+
 # ── unchanged guarantees ──────────────────────────────────────────────
 
 def test_explicit_empty_content_still_allowed(env):
@@ -498,8 +709,26 @@ def test_help_lists_every_dispatched_command_group(env):
     from cli_anything.siyuan.siyuan_cli import _build_repl_commands
     listed = _build_repl_commands()
     for entry in ("notebook open <id>", "doc rename <id> <title>",
-                  "doc remove <id> --dangerous", "block prepend <parent_id> <data>",
-                  "block append <parent_id> <data>", "block children <block_id>",
-                  "block move <block_id> --previous <id>", "tag list", "version",
-                  "status"):
+                  "doc remove <id> --dangerous",
+                  "block prepend <parent_id> <data> [--data-type <markdown|dom>] [--file <path>]",
+                  "block append <parent_id> <data> [--data-type <markdown|dom>] [--file <path>]",
+                  "block children <block_id>",
+                  "block move <block_id> [--previous <id> | --parent <id>]",
+                  "tag list", "version", "status"):
         assert entry in listed
+
+
+def test_every_declared_flag_appears_in_its_signature():
+    """The help line an error echoes must list the flags the command accepts.
+
+    A flag missing from the signature leaves the usage hint advertising only
+    half of what the command takes.
+    """
+    from cli_anything.siyuan.siyuan_cli import (
+        _REPL_ALLOWED_FLAGS, _build_repl_commands)
+    signatures = _build_repl_commands()
+    for key, allowed in _REPL_ALLOWED_FLAGS.items():
+        matching = [s for s in signatures if s.split()[:len(key.split())] == key.split()]
+        assert matching, key
+        silent = [f for f in sorted(allowed) if f not in matching[0]]
+        assert not silent, f"{key}: {silent} missing from {matching[0]!r}"

@@ -1231,6 +1231,21 @@ class TestBlockContentConflict:
             assert "not both" in result.output.lower()
             mock_ctx.client.update_block.assert_not_called()
 
+    def test_empty_file_value_is_an_error_not_the_pipe(self, runner, mock_ctx):
+        """`--file=` names no file; it must not quietly fall through to stdin."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "update", "b1", "--file="],
+                                   input="piped content")
+        assert result.exit_code == 2
+        assert "Cannot read file ''" in result.output
+        mock_ctx.client.update_block.assert_not_called()
+
+    def test_empty_file_value_with_data_is_an_error_too(self, runner, mock_ctx):
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "update", "b1", "inline", "--file="])
+        assert result.exit_code == 2
+        mock_ctx.client.update_block.assert_not_called()
+
 
 
 
@@ -1339,3 +1354,47 @@ class TestReplUnmatchedQuote:
         _dispatch_repl(skin, ctx, 'block update b1 "new text')
         ctx.client.update_block.assert_not_called()
         skin.error.assert_called_once()
+
+
+# ── the global flags reach the context through the real group callback ──
+
+
+class TestGlobalFlagWiring:
+    """Drive `cli()` itself instead of handing the command a made-up context.
+
+    The other tests patch `SiYuanContext` outright and set `json_output` by
+    hand, so the `--json` -> context line had no coverage at all: it could stop
+    crossing over and every one of them would still pass.
+    """
+
+    @pytest.fixture
+    def client(self):
+        client = MagicMock()
+        client.list_notebooks.return_value = [
+            {"id": "nb1", "name": "N", "closed": False}]
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanClient",
+                   return_value=client):
+            yield client
+
+    def test_json_flag_reaches_the_command(self, runner, client):
+        result = runner.invoke(cli, ["--json", "notebook", "list"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == [
+            {"id": "nb1", "name": "N", "closed": False}]
+
+    def test_without_the_flag_the_output_is_plain_text(self, runner, client):
+        result = runner.invoke(cli, ["notebook", "list"])
+        assert result.exit_code == 0
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(result.output)
+
+    def test_repeated_global_option_is_rejected(self, runner, client):
+        result = runner.invoke(
+            cli, ["--host", "a", "--host", "b", "notebook", "list"])
+        assert result.exit_code == 2
+        assert "more than once" in result.output
+
+    def test_non_numeric_port_is_rejected(self, runner, client):
+        result = runner.invoke(cli, ["--port", "abc", "notebook", "list"])
+        assert result.exit_code == 2
+        client.list_notebooks.assert_not_called()
