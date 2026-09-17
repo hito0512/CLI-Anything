@@ -42,11 +42,31 @@ documents, blocks, search, and export.
 ### block — Block operations
 | Subcommand | Description |
 |------------|-------------|
-| `insert [<data> \| --file <path>] --parent <id>` | Insert a block (one anchor required: `--parent`/`--previous`/`--next`) |
+| `insert [<data> \| --file <path>] --parent <id>` | Insert a block (exactly one anchor required: `--parent`/`--previous`/`--next`) |
+| `prepend <parent-id> [<data> \| --file <path>]` | Insert as the first child of a container block |
+| `append <parent-id> [<data> \| --file <path>]` | Insert as the last child of a container block |
 | `update <id> [<data> \| --file <path>]` | Update a block (doc root blocks are not updateable) |
+| `move <id> --previous <id>` | Move a block after a sibling (or `--parent <id>` to nest it) |
 | `delete <id> --dangerous` | Delete a block (requires `--dangerous`) |
 | `get <id>` | Get block kramdown source |
 | `children <id>` | Get child blocks |
+
+`insert` always lands as the **first** child, so appending to a document is
+either `append <doc-id>` or, to keep a specific level, insert then
+`move <id> --previous <current-last-id>`. Note the anchor asymmetry: `insert`
+takes `--next` but `move` does not.
+
+### asset — Asset (资源文件) upload
+| Subcommand | Description |
+|------------|-------------|
+| `upload <file> [<file>...] [--dir /assets/]` | Upload local files; prints `assets/…` paths to reference in markdown |
+
+### attr — Block attributes (块属性)
+| Subcommand | Description |
+|------------|-------------|
+| `get <id>` | Show every attribute (includes read-only synthesized `id`/`type`/`updated`) |
+| `set <id> KEY=VALUE...` | Set attributes; only the first `=` splits, an empty value removes the key |
+| `unset <id> KEY...` | Remove attributes (the kernel drops a key set to an empty value) |
 
 ### Other commands
 | Command | Description |
@@ -59,6 +79,25 @@ documents, blocks, search, and export.
 | `status` | Show connection and session status |
 | `repl` | Start interactive REPL |
 
+## REPL mode
+
+Running the CLI with no command enters a REPL with the same command surface
+(`notebook`/`doc`/`block`/`asset`/`attr`/`sql`/`search`/`export`/`tag`/`version`/`status`),
+plus `help` and `quit`. Three differences from one-shot mode:
+
+- `--json` must be the **first** token of the line (`--json notebook list`).
+- Block/notebook/doc IDs are positional: `block insert <parent_id> <data>`,
+  `block move <id> --previous <id>`. `--previous`/`--next` are one-shot `insert`
+  options only — use `block move` to reorder afterwards.
+- No stdin pipe: content is the argument or `--file`.
+
+`--md`/`--file` values keep a literal `--json` (a flag value is data, not a switch);
+an unclosed quote, a dangling option (`--dir` with no value), a repeated option
+and a surplus positional argument are errors, as is any flag the command does not
+declare — `doc rename d1 --file x` refuses rather than retitling the document to
+`--file x`. The one-shot entry point is equally strict: `--depth 1 --depth 2` is
+rejected, not last-wins.
+
 ## Agent Guidance
 
 - Always use `--json` for machine-readable output
@@ -68,6 +107,13 @@ documents, blocks, search, and export.
 - Connection defaults: `http://127.0.0.1:6806`
 - Prefer `--file <path>` over stdin piping for CJK/multiline content — reading the file directly avoids shell/PowerShell pipe encoding issues
 - Destructive commands (`remove`/`delete`) refuse to run without `--dangerous`
+- Arguments are strict: a flag the command does not declare, an option whose
+  value is missing, an option given twice, and a surplus positional argument are
+  all errors rather than silently ignored content (`doc get <id> extra` fails,
+  it does not drop `extra`)
+- Uploading an image is two steps: `asset upload pic.png` prints the `assets/…` path, then reference it as `![](assets/…)` in a block; the `assets` index table only registers referenced assets, a few seconds later
+- `move` needs a destination anchor; `--parent` only accepts container blocks (document/list/super block), a paragraph-like leaf rejects children — use `--previous` for that
+- Never reorder a document by deleting and recreating it: that replaces every child block ID and invalidates references
 
 ## Examples
 
@@ -83,6 +129,16 @@ cli-anything-siyuan doc create nb1 /projects/new --file note.md
 
 # SQL search
 cli-anything-siyuan sql "SELECT id, content FROM blocks WHERE content LIKE '%meeting%' LIMIT 5"
+
+# Upload an image and reference the printed path
+cli-anything-siyuan asset upload pic.png --dir /assets/notes/
+
+# Tag a block, then read it back
+cli-anything-siyuan attr set 20210817205410-2kvfpfn custom-status=todo name=待核验
+cli-anything-siyuan attr get 20210817205410-2kvfpfn
+
+# Append a block at the end of a document
+cat section.md | cli-anything-siyuan block append <doc-id>
 
 # Export
 cli-anything-siyuan export md doc123
