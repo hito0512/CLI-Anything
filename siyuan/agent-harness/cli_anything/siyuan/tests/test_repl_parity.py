@@ -420,6 +420,61 @@ def test_dangling_option_outranks_the_arity_check(env):
     assert "requires a value" in str(skin.error.call_args)
 
 
+# ── group usage strings cannot drift from the help table ──────────────
+
+def test_bare_doc_usage_drops_the_removed_export(env):
+    """`doc export` is gone; a bare `doc` still advertised it."""
+    skin, _, _ = run(env, "doc")
+    message = str(skin.error.call_args)
+    assert "export" not in message
+    for sub in ("create", "list", "tree", "get", "rename", "remove"):
+        assert sub in message
+
+
+def test_bare_notebook_usage_lists_open(env):
+    """A bare `notebook` omitted `open`."""
+    skin, _, _ = run(env, "notebook")
+    assert "open" in str(skin.error.call_args)
+
+
+@pytest.mark.parametrize("group", ["notebook", "doc", "block", "attr"])
+def test_group_usage_covers_every_help_entry(env, group):
+    from cli_anything.siyuan.siyuan_cli import _build_repl_commands, _repl_group_usage
+    usage = _repl_group_usage(group)
+    subs = [s.split()[1] for s in _build_repl_commands()
+            if s.startswith(f"{group} ") and not s.split()[1].startswith(("<", "["))]
+    assert subs, f"no help entries for {group}"
+    for sub in subs:
+        assert sub in usage
+
+
+def test_unknown_block_alias_points_at_children(env):
+    """`block child` was an undocumented alias that also skipped the arity check."""
+    skin, ctx, _ = run(env, "block child b1 extra")
+    ctx.client.get_child_blocks.assert_not_called()
+    assert "block children <block_id>" in str(skin.error.call_args)
+
+
+def test_doc_create_rejects_empty_md_with_file(env, tmp_path):
+    """`--md "" --file x` used to pick the file without saying so."""
+    note = tmp_path / "note.md"
+    note.write_text("from file", encoding="utf-8")
+    skin, ctx, _ = run(env, f'doc create nb1 /p --md "" --file {note}')
+    ctx.client.create_doc_with_md.assert_not_called()
+    assert "not both" in str(skin.error.call_args)
+
+
+def test_doc_create_rejects_repeated_md(env):
+    skin, ctx, _ = run(env, "doc create nb1 /p --md a --md b")
+    ctx.client.create_doc_with_md.assert_not_called()
+    assert "more than once" in str(skin.error.call_args)
+
+
+def test_doc_create_empty_md_alone_is_an_empty_doc(env):
+    _, ctx, _ = run(env, 'doc create nb1 /p --md ""')
+    ctx.client.create_doc_with_md.assert_called_once_with("nb1", "/p", "")
+
+
 # ── unchanged guarantees ──────────────────────────────────────────────
 
 def test_explicit_empty_content_still_allowed(env):

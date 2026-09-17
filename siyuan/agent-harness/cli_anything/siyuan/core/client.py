@@ -239,8 +239,10 @@ class SiYuanClient:
     def list_doc_tree(self, notebook_id: str, path: str = "/", max_depth: int = -1) -> dict[str, Any]:
         """Recursively list the document tree rooted at path.
 
-        The filetree/listDocTree endpoint rejects root paths and returns no
-        names, so we build the tree from listDocsByPath instead.
+        `filetree/listDocTree` returns only `{id, children}` — its `DocFile`
+        struct carries no name or path (kernel/api/filetree.go), so it cannot
+        feed a display. The tree is built from listDocsByPath instead, which
+        does carry the fields the commands print.
         """
         return {"files": self._list_doc_dir(notebook_id, path, max_depth, 0)}
 

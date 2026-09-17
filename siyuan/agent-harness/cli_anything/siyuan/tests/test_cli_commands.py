@@ -563,6 +563,7 @@ class TestRepeatedOptions:
         ["doc", "tree", "nb1", "--path", "/a", "--path", "/b"],
         ["doc", "tree", "nb1", "--depth", "1", "--depth", "2"],
         ["doc", "create", "nb1", "/p", "--md", "a", "--md", "b"],
+        ["doc", "create", "nb1", "/p", "--file", "a.md", "--file", "b.md"],
         ["block", "update", "b1", "x", "--file", "a.md", "--file", "b.md"],
         ["block", "move", "b1", "--previous", "a", "--previous", "b"],
         ["block", "insert", "x", "--parent", "a", "--parent", "b"],
@@ -1160,8 +1161,52 @@ class TestDocCreateContentConflict:
             assert "both" in result.output.lower()
             mock_ctx.client.create_doc_with_md.assert_not_called()
 
+    def test_explicit_empty_md_with_file_conflict(self, runner, mock_ctx, tmp_path):
+        """`--md "" --file x` gives both sources; emptiness must not decide."""
+        note = tmp_path / "note.md"
+        note.write_text("from file", encoding="utf-8")
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(
+                cli, ["doc", "create", "nb1", "/test", "--md", "", "--file", str(note)]
+            )
+            assert result.exit_code == 2
+            assert "both" in result.output.lower()
+            mock_ctx.client.create_doc_with_md.assert_not_called()
+
+    def test_empty_md_alone_is_accepted(self, runner, mock_ctx):
+        """`--md ""` on its own is an empty document, not a missing argument."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["doc", "create", "nb1", "/test", "--md", ""])
+        assert result.exit_code == 0
+        mock_ctx.client.create_doc_with_md.assert_called_once_with("nb1", "/test", "")
+
 
 class TestBlockContentConflict:
+    def test_insert_rejects_two_anchors(self, runner, mock_ctx):
+        """The kernel applies nextID > previousID > parentID and drops the rest."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(
+                cli, ["block", "insert", "hi", "--parent", "p1", "--previous", "p2"]
+            )
+        assert result.exit_code == 2
+        assert "exactly one anchor" in result.output
+        mock_ctx.client.insert_block.assert_not_called()
+
+    def test_insert_rejects_three_anchors(self, runner, mock_ctx):
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, [
+                "block", "insert", "hi", "--parent", "p1", "--previous", "p2", "--next", "p3"])
+        assert result.exit_code == 2
+        mock_ctx.client.insert_block.assert_not_called()
+
+    def test_insert_with_one_anchor_still_works(self, runner, mock_ctx):
+        mock_ctx.client.insert_block.return_value = []
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "insert", "hi", "--previous", "p2"])
+        assert result.exit_code == 0
+        mock_ctx.client.insert_block.assert_called_once_with(
+            "markdown", "hi", parent_id="", previous_id="p2", next_id="")
+
     def test_block_insert_data_and_file_conflict(self, runner, mock_ctx, tmp_path):
         """block insert positional data + --file is rejected."""
         note = tmp_path / "note.md"

@@ -317,6 +317,18 @@ def _repl_group_commands() -> frozenset[str]:
 _REPL_GROUP_COMMANDS = _repl_group_commands()
 
 
+def _repl_group_usage(group: str) -> str:
+    """`Usage: <group> <a>|<b>|…`, derived from the help table.
+
+    Hand-written lists drifted (a bare `notebook` still offered no `open`, and
+    `doc` still offered the removed `export`).
+    """
+    subs = [signature.split()[1] for signature in _build_repl_commands()
+            if signature.startswith(f"{group} ")
+            and not signature.split()[1].startswith(("<", "["))]
+    return f"Usage: {group} <{'|'.join(subs)}>"
+
+
 def _repl_signature(key: str) -> str:
     """Return the help-table signature for a "<command> [<verb>]" key, or ""."""
     words = key.split()
@@ -631,7 +643,7 @@ def _handle_notebook_repl(skin: Any, client: SiYuanClient,
                           session: SessionManager, parts: list[str],
                           json_mode: bool, dangerous: bool = False) -> None:
     if len(parts) < 2:
-        skin.error("Usage: notebook <list|create|rename|remove>")
+        skin.error(_repl_group_usage("notebook"))
         return
     sub = parts[1]
     if sub == "list":
@@ -681,13 +693,14 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
                      session: SessionManager, parts: list[str],
                      json_mode: bool, dangerous: bool = False) -> None:
     if len(parts) < 2:
-        skin.error("Usage: doc <create|list|tree|get|rename|remove|export>")
+        skin.error(_repl_group_usage("doc"))
         return
     sub = parts[1]
     if sub == "create" and len(parts) >= 4:
         # Parse --md/--file and strip both flags with their values in a single
         # pass so behavior does not depend on argument order (Codex review).
-        md, file_path = "", ""
+        md: str | None = None
+        file_path: str | None = None
         stripped: list[str] = []
         i = 0
         while i < len(parts):
@@ -697,8 +710,14 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
                     skin.error(f"Option {p} requires a value.")
                     return
                 if p == "--md":
+                    if md is not None:
+                        skin.error("Option --md is given more than once.")
+                        return
                     md = parts[i + 1]
                 else:
+                    if file_path is not None:
+                        skin.error("Option --file is given more than once.")
+                        return
                     file_path = parts[i + 1]
                 i += 2  # skip flag and its value
             else:
@@ -710,14 +729,16 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
         if len(parts) < 4:
             skin.error(f"Usage: {_repl_signature('doc create')}")
             return
-        if file_path:
-            if md:
-                skin.error("Use either --md or --file, not both.")
-                return
+        # Presence, not truthiness: `--md "" --file note.md` gave both sources
+        # and used to pick the file without saying so.
+        if md is not None and file_path is not None:
+            skin.error("Use either --md or --file, not both.")
+            return
+        if file_path is not None:
             md = _read_file(file_path)
         nb_id = parts[2]
         doc_path = parts[3]
-        doc_id = client.create_doc_with_md(nb_id, doc_path, md)
+        doc_id = client.create_doc_with_md(nb_id, doc_path, md or "")
         session.update(current_doc_id=doc_id, current_doc_path=doc_path)
         if json_mode:
             click.echo(json.dumps({"id": doc_id}, ensure_ascii=False))
@@ -777,9 +798,6 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
         _repl_reject(skin, f"doc {sub}", f"Unknown doc command: {sub}")
 
 
-_ANCHOR_FLAGS = ("--parent", "--previous", "--next")
-
-
 def _parse_repl_content_source(parts: list[str], start: int, skin: Any) -> tuple[list[str], str] | None:
     """Split parts[start:] into (positionals, file_path).
 
@@ -810,19 +828,14 @@ def _parse_repl_block_write(parts: list[str], skin: Any,
                             usage: str) -> tuple[str, str] | None:
     """Parse `<block_id> [<data> | --file <path>]` for the block write commands.
 
-    Returns (target_id, data), or None after reporting the error. The target is
-    positional in the REPL, so a stray anchor flag is rejected instead of being
-    swallowed into the block content.
+    Returns (target_id, data), or None after reporting the error. A stray flag
+    never gets this far: `_dispatch_repl` rejects a flag the command does not
+    declare before dispatching, so an anchor cannot be swallowed as content.
     """
     parsed = _parse_repl_content_source(parts, 2, skin)
     if parsed is None:
         return None
     rest, file_path = parsed
-    for flag in _ANCHOR_FLAGS:
-        if flag in rest:
-            skin.error(f"{flag} is not an option here — the block ID is positional. "
-                       f"Usage: {usage}")
-            return None
     if not rest:
         skin.error(f"Usage: {usage}")
         return None
@@ -875,7 +888,7 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
                        parts: list[str], json_mode: bool,
                        dangerous: bool = False) -> None:
     if len(parts) < 2:
-        skin.error("Usage: block <insert|prepend|append|update|move|delete|get|children>")
+        skin.error(_repl_group_usage("block"))
         return
     sub = parts[1]
     if sub in ("insert", "prepend", "append", "update"):
@@ -942,7 +955,7 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             click.echo(json.dumps({"kramdown": kramdown}, ensure_ascii=False))
         else:
             click.echo(kramdown)
-    elif sub in ("child", "children") and len(parts) >= 3:
+    elif sub == "children" and len(parts) >= 3:
         children = client.get_child_blocks(parts[2])
         if json_mode:
             click.echo(json.dumps(children, ensure_ascii=False))
@@ -950,6 +963,11 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
             skin.table(["ID", "Type", "SubType"],
                        [[c.get("id", ""), c.get("type", ""), c.get("subType", "")]
                         for c in children])
+    elif sub == "child":
+        # `block child` was an undocumented second spelling of `children`, and
+        # being unlisted it also slipped past the positional-count check.
+        skin.error(f"Usage: {_repl_signature('block children')} (the subcommand "
+                   f"is `children`)")
     else:
         _repl_reject(skin, f"block {sub}", f"Unknown block command: {sub}")
 
@@ -987,9 +1005,8 @@ def _handle_asset_repl(skin: Any, client: SiYuanClient,
 
 def _handle_attr_repl(skin: Any, client: SiYuanClient,
                       parts: list[str], json_mode: bool) -> None:
-    usage = "Usage: attr <get|set|unset> <block-id> [KEY=VALUE | KEY]..."
     if len(parts) < 3:
-        skin.error(usage)
+        skin.error(_repl_group_usage("attr"))
         return
     sub, block_id = parts[1], parts[2]
     if sub == "get":
@@ -1200,21 +1217,24 @@ def doc():
 @doc.command("create")
 @click.argument("notebook_id")
 @click.argument("path")
-@click.option("--md", multiple=True, default=None, callback=_single_use(""), help="Markdown content.")
-@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(""), help="Read markdown content from a UTF-8 file (avoids PowerShell pipe encoding issues).")
+@click.option("--md", multiple=True, default=None, callback=_single_use(None), help="Markdown content.")
+@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(None), help="Read markdown content from a UTF-8 file (avoids PowerShell pipe encoding issues).")
 @click.pass_obj
-def doc_create(ctx: SiYuanContext, notebook_id: str, path: str, md: str, file_path: str):
+def doc_create(ctx: SiYuanContext, notebook_id: str, path: str,
+               md: str | None, file_path: str | None):
     """Create a document with optional Markdown content.
 
     Prefer --file for content with CJK or special characters
     (backticks, quotes, parentheses) to avoid shell escaping:
       sy doc create nb1 /test --file note.md
     """
-    if file_path:
-        if md:
-            raise click.UsageError("Use either --md or --file, not both.")
+    # Presence, not truthiness: `--md "" --file note.md` gave both sources and
+    # used to pick the file without saying so.
+    if md is not None and file_path is not None:
+        raise click.UsageError("Use either --md or --file, not both.")
+    if file_path is not None:
         md = _read_file(file_path)
-    doc_id = ctx.client.create_doc_with_md(notebook_id, path, md)
+    doc_id = ctx.client.create_doc_with_md(notebook_id, path, md or "")
     if ctx.json_output:
         click.echo(json.dumps({"id": doc_id}, ensure_ascii=False))
     else:
@@ -1313,9 +1333,22 @@ def block():
 @click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(""), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
 @click.pass_obj
 def block_insert(ctx: SiYuanContext, data: str | None, previous: str, parent: str, next_: str, data_type: str, file_path: str):
-    """Insert a block. Reads from stdin when no data is given (empty pipe is rejected)."""
-    if not parent and not previous and not next_:
+    """Insert a block. Reads from stdin when no data is given (empty pipe is rejected).
+
+    Give exactly one anchor: --parent, --previous or --next. With two the
+    kernel applies nextID > previousID > parentID and drops the rest, so the
+    block would land elsewhere than asked.
+    """
+    anchors = [name for name, value in
+               (("--parent", parent), ("--previous", previous), ("--next", next_)) if value]
+    if not anchors:
         raise click.UsageError("An anchor is required: --parent, --previous, or --next")
+    if len(anchors) > 1:
+        # The kernel applies nextID > previousID > parentID and silently drops
+        # the rest, so a second anchor would place the block somewhere else
+        # than the caller asked for.
+        raise click.UsageError(
+            f"Give exactly one anchor, not {len(anchors)}: {', '.join(anchors)}")
     data = _resolve_block_data(data, file_path)
     result = ctx.client.insert_block(data_type, data, parent_id=parent, previous_id=previous, next_id=next_)
     if ctx.json_output:
@@ -1413,7 +1446,7 @@ def block_children(ctx: SiYuanContext, block_id: str):
 
 @block.command("move")
 @click.argument("block_id")
-@click.option("--previous", multiple=True, default=None, callback=_single_use(""), help="Land right after this block ID (same level). Pass the current last block to append at the end of a document.")
+@click.option("--previous", multiple=True, default=None, callback=_single_use(""), help="Land right after this block ID (same level). To land at the end of a document use `block append` instead.")
 @click.option("--parent", multiple=True, default=None, callback=_single_use(""), help="Land inside this block, as its first child. The parent must be a container block (document, list, super block) — paragraph-like leaf blocks reject children.")
 @click.pass_obj
 def block_move(ctx: SiYuanContext, block_id: str, previous: str, parent: str):
@@ -1421,8 +1454,8 @@ def block_move(ctx: SiYuanContext, block_id: str, previous: str, parent: str):
 
     --previous keeps the block at its own level (moves it after a sibling);
     --parent nests it as the first child of a container block. Exactly one
-    destination is needed — the API has no "last child" anchor, so use
-    --previous with the current last child ID to append.
+    destination is needed. `block append` is the way to land at the end of a
+    document — this command is for relocating a block that already exists.
     """
     if not previous and not parent:
         raise click.UsageError("A destination is required: --previous <id> or --parent <id>")
