@@ -53,7 +53,12 @@ def _read_stdin() -> str:
             return raw.decode(enc)
         except UnicodeDecodeError:
             continue
-    return raw.decode("utf-8-sig", errors="replace")
+    # Neither candidate fits; decoding with errors="replace" would store
+    # mojibake silently, so refuse and name the way out.
+    raise click.UsageError(
+        "stdin is neither UTF-8 nor GB18030. Set SIYUAN_STDIN_ENCODING to the "
+        "pipe's encoding, or pass the content with --file."
+    )
 
 
 def _read_file(path: str) -> str:
@@ -80,6 +85,58 @@ def _confirm_dangerous(dangerous: bool, action: str) -> None:
         )
 
 
+def _parse_attr_pairs(pairs: tuple[str, ...]) -> dict[str, str]:
+    """Parse KEY=VALUE arguments into an attribute dict.
+
+    A value may itself contain '='; only the first one splits key from value.
+    """
+    attrs: dict[str, str] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            raise click.UsageError(f"Expected KEY=VALUE, got: {pair}")
+        attrs[key] = value
+    return attrs
+
+
+def _single_use(fallback: Any) -> Any:
+    """Build a callback that refuses an option given more than once.
+
+    click's default for a non-`multiple` option is last-wins, while the REPL
+    rejects a repeated option — both entry points should agree. Declaring the
+    option `multiple=True` is what makes the repetition visible; the callback
+    then collapses the tuple back to the single value the command expects.
+    """
+    def callback(ctx: click.Context, param: click.Parameter,
+                 value: tuple[Any, ...]) -> Any:
+        if len(value) > 1:
+            raise click.UsageError(f"Option {param.opts[0]} is given more than once.")
+        return value[0] if value else fallback
+    return callback
+
+
+def _resolve_block_data(data: str | None, file_path: str) -> str:
+    """Resolve block content from the argument, --file, or a stdin pipe.
+
+    Exactly one source is used; an explicit empty argument is content (it
+    clears the block), while an absent one falls through to the pipe and is
+    rejected when that is empty too.
+    """
+    if file_path:
+        if data is not None:
+            raise click.UsageError(
+                "Provide block data either as an argument or via --file, not both.")
+        return _read_file(file_path)
+    if data is not None:
+        return data
+    piped = _read_stdin()
+    if not piped:
+        raise click.UsageError(
+            "No block content provided: give it as an argument, via --file, "
+            "or pipe a non-empty stdin.")
+    return piped
+
+
 # ── Click context ─────────────────────────────────────────────────────
 
 class SiYuanContext:
@@ -104,18 +161,13 @@ class _CatchErrors(click.Group):
 
 @click.group(cls=_CatchErrors, invoke_without_command=True)
 @click.option("--json", "json_output", is_flag=True, help="Output in JSON format")
-@click.option("--host", default="", help="SiYuan host (default: 127.0.0.1)")
-@click.option("--port", default=0, type=int, help="SiYuan port (default: 6806)")
-@click.option("--token", default="", help="SiYuan API token")
-@click.option("--config", "config_path", default="", help="Config file path")
+@click.option("--host", multiple=True, default=None, callback=_single_use(""), help="SiYuan host (default: 127.0.0.1)")
+@click.option("--port", multiple=True, default=None, type=int, callback=_single_use(0), help="SiYuan port (default: 6806)")
+@click.option("--token", multiple=True, default=None, callback=_single_use(""), help="SiYuan API token")
+@click.option("--config", "config_path", multiple=True, default=None, callback=_single_use(""), help="Config file path")
 @click.pass_context
 def cli(ctx: click.Context, json_output: bool, host: str, port: int,
         token: str, config_path: str):
-    # Force UTF-8 output to handle CJK characters on Windows
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, 'reconfigure'):
-            stream.reconfigure(encoding='utf-8')
-
     """CLI for SiYuan (思源笔记) — interact with your knowledge base.
 
     Connects to a running SiYuan instance via its HTTP API.
@@ -124,6 +176,12 @@ def cli(ctx: click.Context, json_output: bool, host: str, port: int,
     Configure connection via ~/.siyuan-cli.json, env vars
     (SIYUAN_HOST, SIYUAN_PORT, SIYUAN_TOKEN), or CLI flags.
     """
+    # Force UTF-8 output to handle CJK characters on Windows (must stay out of
+    # the docstring slot: click reads help from __doc__).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8')
+
     session = SessionManager()
     session.load()
     cfg = load_config(config_path or None)
@@ -160,29 +218,191 @@ def _walk_tree(items: list[dict], depth: int = 0) -> list[dict]:
     return result
 
 
+def _open_notebook(client: SiYuanClient, session: SessionManager,
+                   notebook_id: str) -> str:
+    """Open a notebook, remember it in the session, and return its name.
+
+    Shared by the one-shot and REPL entry points so both set the session
+    fields the same way.
+    """
+    client.open_notebook(notebook_id)
+    name = notebook_id
+    for nb in client.list_notebooks():
+        if nb.get("id") == notebook_id:
+            name = nb.get("name", notebook_id)
+            break
+    session.update(current_notebook_id=notebook_id, current_notebook_name=name)
+    return name
+
+
+def _status_info(client: SiYuanClient, session: SessionManager) -> dict[str, Any]:
+    """Live connection and session facts, shared by the two `status` commands."""
+    connected = client.ping()
+    version = ""
+    if connected:
+        try:
+            version = client.get_version()
+        except SiYuanClientError:
+            version = ""
+    state = session.state
+    return {
+        "connected": connected,
+        "siyuan_version": version,
+        "host": client.config.host,
+        "port": client.config.port,
+        "current_notebook": state.current_notebook_name or "",
+        "current_doc": state.current_doc_path or "",
+    }
+
+
 # ── REPL ───────────────────────────────────────────────────────────────
 
 def _build_repl_commands() -> dict[str, str]:
+    """REPL command signatures and one-line descriptions.
+
+    The signatures are also the usage strings reported on a bad invocation
+    (`_repl_signature`), so this table is the single source for both the
+    `help` listing and the error hints.
+    """
     return {
         "notebook list": "List all notebooks",
         "notebook create <name>": "Create a notebook",
         "notebook rename <id> <name>": "Rename a notebook",
-        "notebook remove <id>": "Remove a notebook (requires --dangerous)",
-        "doc create <notebook> <path>": "Create a document with optional --md/--file content",
-        "doc list <notebook> <path>": "List documents at path",
-        "doc tree <notebook>": "List full document tree",
-        "doc get <id>": "Get document info by ID",
-        "block insert <parent> <data>": "Insert a block",
-        "block update <id> <data>": "Update a block",
-        "block delete <id>": "Delete a block (requires --dangerous)",
-        "block get <id>": "Get block kramdown source",
+        "notebook remove <id> --dangerous": "Remove a notebook (destructive)",
+        "notebook open <id>": "Open a notebook",
+        "doc create <notebook> <path> [--md <content> | --file <path>]": "Create a document",
+        "doc list <notebook> [path]": "List documents at path",
+        "doc tree <notebook> [--path <path>] [--depth N]": "List document tree",
+        "doc get <id>": "Get document path by ID",
+        "doc rename <id> <title>": "Rename a document",
+        "doc remove <id> --dangerous": "Remove a document (destructive)",
+        "block insert <parent_id> <data>": "Insert a block; content is <data> or --file",
+        "block prepend <parent_id> <data>": "Insert as the first child",
+        "block append <parent_id> <data>": "Insert as the last child",
+        "block update <block_id> <data>": "Update a block; content is <data> or --file",
+        "block move <block_id> --previous <id>": "Move a block (--previous or --parent)",
+        "block delete <block_id> --dangerous": "Delete a block (destructive)",
+        "block get <block_id>": "Get block kramdown source",
+        "block children <block_id>": "Get child blocks",
+        "asset upload <file> [<file>...] [--dir <dir>]": "Upload files as assets",
+        "attr get <block-id>": "Show a block's attributes",
+        "attr set <block-id> KEY=VALUE": "Set block attributes (empty value removes)",
+        "attr unset <block-id> KEY [KEY...]": "Remove block attributes",
         "sql <stmt>": "Execute SQL query",
         "search <query>": "Full-text search",
         "export md <doc-id>": "Export doc as Markdown",
+        "tag list": "List all tags",
+        "version": "Show SiYuan kernel version",
         "status": "Show connection and session status",
         "help": "Show this help",
         "quit": "Exit REPL",
     }
+
+
+def _repl_group_commands() -> frozenset[str]:
+    """The commands whose second token is a subcommand.
+
+    Derived from the help table rather than listed twice: a signature like
+    `sql <stmt>` is single-word (`<stmt>` is a placeholder, not a verb), so a
+    stray token after `sql` is an extra argument, not a subcommand.
+    """
+    groups = set()
+    for signature in _build_repl_commands():
+        words = signature.split()
+        if len(words) > 1 and not words[1].startswith(("<", "[")):
+            groups.add(words[0])
+    return frozenset(groups)
+
+
+_REPL_GROUP_COMMANDS = _repl_group_commands()
+
+
+def _repl_signature(key: str) -> str:
+    """Return the help-table signature for a "<command> [<verb>]" key, or ""."""
+    words = key.split()
+    for signature in _build_repl_commands():
+        if signature.split()[:len(words)] == words:
+            return signature
+    return ""
+
+
+def _repl_reject(skin: Any, key: str, unknown: str) -> None:
+    """Report a subcommand that is either incomplete or does not exist.
+
+    A known subcommand with missing arguments gets its real signature; an
+    unknown one gets `unknown`. `Invalid doc command` for both was what made
+    a missing argument indistinguishable from a typo.
+    """
+    signature = _repl_signature(key)
+    skin.error(f"Usage: {signature}" if signature else unknown)
+
+
+def _repl_positionals(tokens: list[str], value_flags: tuple[str, ...]) -> list[str]:
+    """Tokens that are neither an option nor an option's value."""
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i] in value_flags:
+            i += 2 if i + 1 < len(tokens) else 1
+        else:
+            out.append(tokens[i])
+            i += 1
+    return out
+
+
+# Every flag the CLI defines. In the REPL a flag is an option wherever it
+# appears, so one turning up in a command that does not declare it is a
+# mistake, never content: `doc rename d1 --file x` used to retitle the
+# document to the literal "--file x".
+_REPL_KNOWN_FLAGS = frozenset({
+    "--json", "--host", "--port", "--token", "--config", "--dangerous",
+    "--md", "--file", "--data-type", "--dir", "--path", "--depth",
+    "--previous", "--parent", "--next",
+})
+
+# Flags that consume the next token. `--md`/`--file` carry content, so a
+# flag-shaped value is still data (`--md "--json"` writes the literal text);
+# the rest treat a flag-shaped value as a dangling option instead.
+_REPL_CONTENT_FLAGS = frozenset({"--md", "--file"})
+_REPL_STRICT_VALUE_FLAGS = frozenset({"--dir", "--path", "--depth", "--previous", "--parent"})
+_REPL_VALUE_FLAGS = _REPL_CONTENT_FLAGS | _REPL_STRICT_VALUE_FLAGS
+
+# "<command>" or "<command> <verb>" -> the flags that command declares
+_REPL_ALLOWED_FLAGS: dict[str, frozenset[str]] = {
+    "notebook remove": frozenset({"--dangerous"}),
+    "doc create": frozenset({"--md", "--file"}),
+    "doc tree": frozenset({"--path", "--depth"}),
+    "doc remove": frozenset({"--dangerous"}),
+    "block insert": frozenset({"--file"}),
+    "block prepend": frozenset({"--file"}),
+    "block append": frozenset({"--file"}),
+    "block update": frozenset({"--file"}),
+    "block delete": frozenset({"--dangerous"}),
+    "block move": frozenset({"--previous", "--parent"}),
+    "asset upload": frozenset({"--dir"}),
+}
+
+# Exact positional count per command. Commands whose last argument is variadic
+# (a joined name/title, block content, an SQL statement) are left out.
+_REPL_MAX_POSITIONALS: dict[str, int] = {
+    "notebook list": 0,
+    "notebook open": 1,
+    "notebook remove": 1,
+    "doc create": 2,
+    "doc list": 2,
+    "doc tree": 1,
+    "doc get": 1,
+    "doc remove": 1,
+    "block move": 1,
+    "block delete": 1,
+    "block get": 1,
+    "block children": 1,
+    "attr get": 1,
+    "export md": 1,
+    "tag list": 0,
+    "version": 0,
+    "status": 0,
+}
 
 
 @cli.command()
@@ -200,7 +420,14 @@ def repl(ctx: click.Context):
     skin = ReplSkin("siyuan", version=kernel_version)
     skin.print_banner()
 
-    pt_session = skin.create_prompt_session()
+    try:
+        pt_session = skin.create_prompt_session()
+    except Exception as e:
+        # prompt_toolkit needs a real console; a piped stdin (or a Windows shell
+        # without a console buffer) would otherwise surface a raw traceback.
+        skin.error(f"REPL needs an interactive console ({e}).")
+        skin.info("Use one-shot commands instead, e.g. `cli-anything-siyuan notebook list`.")
+        return
     commands = _build_repl_commands()
 
     state = obj.session.state
@@ -223,21 +450,14 @@ def repl(ctx: click.Context):
         if not user_input:
             continue
 
-        if user_input in ("quit", "exit", "q"):
+        # `help`/`quit` are REPL-local, so they never reach the dispatcher.
+        word = user_input.strip()
+        if word in ("quit", "exit", "q"):
             obj.session.flush()
             break
 
-        if user_input == "help":
+        if word == "help":
             skin.help(commands)
-            continue
-
-        if user_input == "status":
-            connected = obj.client.ping()
-            skin.status_block({
-                "Connected": str(connected),
-                "Notebook": state.current_notebook_name or "(none)",
-                "Document": state.current_doc_path or "(none)",
-            }, title="Status")
             continue
 
         try:
@@ -310,7 +530,7 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
 
     # Each flag has exactly one meaning; a known flag in the wrong place errors
     # rather than being silently treated as content. A token that is the value
-    # of --md/--file is data, not a flag.
+    # of an option is data, not a flag.
     json_mode = parts[0] == "--json"
     if json_mode:
         parts = parts[1:]
@@ -320,10 +540,14 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
     value_idx: set[int] = set()
     j = 0
     while j < len(parts) - 1:
-        if parts[j] in ("--md", "--file"):
+        if parts[j] not in _REPL_VALUE_FLAGS:
+            j += 1
+        elif parts[j] in _REPL_CONTENT_FLAGS or not parts[j + 1].startswith("--"):
             value_idx.add(j + 1)
             j += 2
         else:
+            # Dangling: `--previous --parent p1` must not eat "--parent", or
+            # "p1" is left looking like a stray positional.
             j += 1
     stray = {p for k, p in enumerate(parts) if k not in value_idx}
     if "--json" in stray:
@@ -331,36 +555,74 @@ def _dispatch_repl(skin: Any, ctx: SiYuanContext, cmd: str) -> None:
         return
 
     command = parts[0]
-    verb = parts[1] if len(parts) > 1 else ""
-    is_delete = ((command in ("notebook", "doc") and verb == "remove")
-                 or (command == "block" and verb == "delete"))
+    # A verb exists only after a group command, and a flag where the verb would
+    # be is not one: `search --dangerous` must report the usage of `search`,
+    # and `version extra` must treat `extra` as an argument, not a subcommand.
+    verb = (parts[1] if command in _REPL_GROUP_COMMANDS and len(parts) > 1
+            and not parts[1].startswith("--") else "")
+    key = f"{command} {verb}" if verb else command
+    allowed = _REPL_ALLOWED_FLAGS.get(key, frozenset())
+
     dangerous = False
-    if is_delete:
-        if "--dangerous" in stray:
-            dangerous = True
-            parts = [p for k, p in enumerate(parts)
-                     if not (k not in value_idx and p == "--dangerous")]
-    elif "--dangerous" in stray:
-        skin.error("--dangerous only confirms deletion (notebook/doc remove, block delete)")
+    if "--dangerous" in stray and "--dangerous" in allowed:
+        dangerous = True
+        parts = [p for k, p in enumerate(parts)
+                 if not (k not in value_idx and p == "--dangerous")]
+        stray = stray - {"--dangerous"}
+
+    misplaced = sorted(p for p in stray
+                       if p in _REPL_KNOWN_FLAGS and p not in allowed)
+    if misplaced:
+        hint = f" (accepts {', '.join(sorted(allowed))})" if allowed else ""
+        signature = _repl_signature(key)
+        skin.error(f"{misplaced[0]} is not an option here{hint}. "
+                   f"Usage: {signature or key}")
         return
 
-    if command == "notebook":
-        _handle_notebook_repl(skin, client, session, parts, json_mode, dangerous)
-    elif command == "doc":
-        _handle_doc_repl(skin, client, session, parts, json_mode, dangerous)
-    elif command == "block":
-        _handle_block_repl(skin, client, parts, json_mode, dangerous)
-    elif command == "sql" and len(parts) >= 2:
-        _handle_sql_repl(skin, client, parts, json_mode)
-    elif command == "search" and len(parts) >= 2:
-        _handle_search_repl(skin, client, parts, json_mode)
-    elif command == "export":
-        if len(parts) < 2:
-            skin.error("Usage: export md <doc-id>")
+    # Fixed-arity commands reject leftover positionals: `doc list nb1 a b` and
+    # `doc get d1 extra` used to drop the extra argument without a word.
+    limit = _REPL_MAX_POSITIONALS.get(key)
+    if limit is not None:
+        positionals = [p for k, p in enumerate(parts)
+                       if k not in value_idx and not p.startswith("--")]
+        extra = positionals[1 + (1 if verb else 0) + limit:]
+        if extra:
+            skin.error(f"Unexpected argument: {extra[0]}. "
+                       f"Usage: {_repl_signature(key) or key}")
             return
-        _handle_export_repl(skin, client, parts, json_mode)
-    else:
-        skin.error(f"Unknown command: {command}")
+
+    try:
+        if command == "notebook":
+            _handle_notebook_repl(skin, client, session, parts, json_mode, dangerous)
+        elif command == "doc":
+            _handle_doc_repl(skin, client, session, parts, json_mode, dangerous)
+        elif command == "block":
+            _handle_block_repl(skin, client, parts, json_mode, dangerous)
+        elif command == "asset":
+            _handle_asset_repl(skin, client, parts, json_mode)
+        elif command == "attr":
+            _handle_attr_repl(skin, client, parts, json_mode)
+        elif command == "sql":
+            _handle_sql_repl(skin, client, parts, json_mode)
+        elif command == "search":
+            _handle_search_repl(skin, client, parts, json_mode)
+        elif command == "tag":
+            _handle_tag_repl(skin, client, parts, json_mode)
+        elif command == "version":
+            _handle_version_repl(skin, client, json_mode)
+        elif command == "status":
+            _handle_status_repl(skin, client, session, json_mode)
+        elif command == "export":
+            if len(parts) < 2:
+                skin.error(f"Usage: {_repl_signature('export md')}")
+                return
+            _handle_export_repl(skin, client, parts, json_mode)
+        else:
+            skin.error(f"Unknown command: {command}")
+    except click.UsageError as e:
+        # Option parsing problems (dangling option, conflicting anchors) are
+        # user errors, not crashes.
+        skin.error(str(e))
 
 
 # ── REPL sub-handlers ──────────────────────────────────────────────────
@@ -385,18 +647,34 @@ def _handle_notebook_repl(skin: Any, client: SiYuanClient,
         nb = client.create_notebook(name)
         session.update(current_notebook_id=nb["id"], current_notebook_name=nb["name"])
         client.open_notebook(nb["id"])
-        skin.success(f'Created notebook: {nb["name"]} ({nb["id"]})')
+        if json_mode:
+            click.echo(json.dumps(nb, ensure_ascii=False))
+        else:
+            skin.success(f'Created notebook: {nb["name"]} ({nb["id"]})')
+    elif sub == "open" and len(parts) >= 3:
+        name = _open_notebook(client, session, parts[2])
+        if json_mode:
+            click.echo(json.dumps({"opened": parts[2], "name": name}, ensure_ascii=False))
+        else:
+            skin.success(f"Opened notebook: {name} ({parts[2]})")
     elif sub == "rename" and len(parts) >= 4:
-        client.rename_notebook(parts[2], " ".join(parts[3:]))
-        skin.success("Renamed")
+        name = " ".join(parts[3:])
+        client.rename_notebook(parts[2], name)
+        if json_mode:
+            click.echo(json.dumps({"renamed": parts[2], "name": name}, ensure_ascii=False))
+        else:
+            skin.success("Renamed")
     elif sub == "remove" and len(parts) >= 3:
         if not dangerous:
             skin.error("Refusing to remove a notebook without confirmation. Add --dangerous.")
             return
         client.remove_notebook(parts[2])
-        skin.success("Removed")
+        if json_mode:
+            click.echo(json.dumps({"removed": parts[2]}, ensure_ascii=False))
+        else:
+            skin.success("Removed")
     else:
-        skin.error("Invalid notebook command")
+        _repl_reject(skin, f"notebook {sub}", f"Unknown notebook command: {sub}")
 
 
 def _handle_doc_repl(skin: Any, client: SiYuanClient,
@@ -430,7 +708,7 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
         # Stripping --md/--file may have removed the positionals themselves
         # (e.g. `doc create nb1 --file note.md`); recheck before indexing.
         if len(parts) < 4:
-            skin.error("Usage: doc create <notebook> <path> [--md content | --file path]")
+            skin.error(f"Usage: {_repl_signature('doc create')}")
             return
         if file_path:
             if md:
@@ -445,8 +723,8 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
             click.echo(json.dumps({"id": doc_id}, ensure_ascii=False))
         else:
             skin.success(f"Created doc: {doc_id}")
-    elif sub == "list" and len(parts) >= 4:
-        docs = client.list_docs_by_path(parts[2], parts[3])
+    elif sub == "list" and len(parts) >= 3:
+        docs = client.list_docs_by_path(parts[2], parts[3] if len(parts) >= 4 else "/")
         items = docs.get("files", []) if isinstance(docs, dict) else docs
         if json_mode:
             click.echo(json.dumps(items, ensure_ascii=False))
@@ -455,7 +733,9 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
                        [[d.get("id", ""), d.get("name", ""), d.get("type", "")]
                         for d in items])
     elif sub == "tree" and len(parts) >= 3:
-        tree = client.list_doc_tree(parts[2])
+        path = _repl_opt(parts[3:], "--path") or "/"
+        depth = _repl_int(parts[3:], "--depth", -1)
+        tree = client.list_doc_tree(parts[2], path=path, max_depth=depth)
         if isinstance(tree, dict):
             items = tree.get("files") or tree.get("tree") or []
         else:
@@ -473,23 +753,31 @@ def _handle_doc_repl(skin: Any, client: SiYuanClient,
         else:
             skin.success(f"Path: {hpath}")
     elif sub == "rename" and len(parts) >= 4:
-        client.rename_doc_by_id(parts[2], " ".join(parts[3:]))
-        skin.success("Renamed")
+        title = " ".join(parts[3:])
+        client.rename_doc_by_id(parts[2], title)
+        if json_mode:
+            click.echo(json.dumps({"renamed": parts[2], "title": title}, ensure_ascii=False))
+        else:
+            skin.success("Renamed")
     elif sub == "remove" and len(parts) >= 3:
         if not dangerous:
             skin.error("Refusing to remove a document without confirmation. Add --dangerous.")
             return
         client.remove_doc_by_id(parts[2])
-        skin.success("Removed")
-    elif sub == "export" and len(parts) >= 3:
-        md = client.export_md_content(parts[2])
         if json_mode:
-            click.echo(json.dumps(md, ensure_ascii=False))
+            click.echo(json.dumps({"removed": parts[2]}, ensure_ascii=False))
         else:
-            skin.section(md.get("hPath", ""))
-            click.echo(md.get("content", ""))
+            skin.success("Removed")
+    elif sub == "export":
+        # Documents are exported through the `export` command; `doc export`
+        # used to be a second spelling of the same thing.
+        skin.error(f"Usage: {_repl_signature('export md')} (export lives in the "
+                   f"`export` command, not `doc`)")
     else:
-        skin.error("Invalid doc command")
+        _repl_reject(skin, f"doc {sub}", f"Unknown doc command: {sub}")
+
+
+_ANCHOR_FLAGS = ("--parent", "--previous", "--next")
 
 
 def _parse_repl_content_source(parts: list[str], start: int, skin: Any) -> tuple[list[str], str] | None:
@@ -507,6 +795,9 @@ def _parse_repl_content_source(parts: list[str], start: int, skin: Any) -> tuple
             if i + 1 >= len(parts):
                 skin.error("Option --file requires a value.")
                 return None
+            if file_path:
+                skin.error("Option --file is given more than once.")
+                return None
             file_path = parts[i + 1]
             i += 2
         else:
@@ -515,118 +806,136 @@ def _parse_repl_content_source(parts: list[str], start: int, skin: Any) -> tuple
     return rest, file_path
 
 
+def _parse_repl_block_write(parts: list[str], skin: Any,
+                            usage: str) -> tuple[str, str] | None:
+    """Parse `<block_id> [<data> | --file <path>]` for the block write commands.
+
+    Returns (target_id, data), or None after reporting the error. The target is
+    positional in the REPL, so a stray anchor flag is rejected instead of being
+    swallowed into the block content.
+    """
+    parsed = _parse_repl_content_source(parts, 2, skin)
+    if parsed is None:
+        return None
+    rest, file_path = parsed
+    for flag in _ANCHOR_FLAGS:
+        if flag in rest:
+            skin.error(f"{flag} is not an option here — the block ID is positional. "
+                       f"Usage: {usage}")
+            return None
+    if not rest:
+        skin.error(f"Usage: {usage}")
+        return None
+    target_id = rest[0]
+    has_data_arg = len(rest) > 1
+    data = " ".join(rest[1:]) if has_data_arg else ""
+    if file_path:
+        if has_data_arg:
+            skin.error("Provide block data either as an argument or via --file, not both.")
+            return None
+        try:
+            data = _read_file(file_path)
+        except click.UsageError as e:
+            skin.error(str(e))
+            return None
+    elif not has_data_arg:
+        skin.error("Provide block data either as an argument or via --file.")
+        return None
+    return target_id, data
+
+
+def _repl_opt(tokens: list[str], name: str) -> str:
+    """Return the value following `name` in REPL tokens, or "" when absent.
+
+    Raises UsageError when the flag is dangling, repeated, or its value is
+    itself a flag: `--previous --parent p1` must not read "--parent" as an ID.
+    """
+    if name not in tokens:
+        return ""
+    if tokens.count(name) > 1:
+        raise click.UsageError(f"Option {name} is given more than once.")
+    i = tokens.index(name)
+    if i + 1 >= len(tokens) or tokens[i + 1].startswith("--"):
+        raise click.UsageError(f"Option {name} requires a value.")
+    return tokens[i + 1]
+
+
+def _repl_int(tokens: list[str], name: str, default: int) -> int:
+    """Return the integer value of `name`, or `default` when absent."""
+    raw = _repl_opt(tokens, name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise click.UsageError(f"Option {name} expects an integer, got {raw!r}")
+
+
 def _handle_block_repl(skin: Any, client: SiYuanClient,
                        parts: list[str], json_mode: bool,
                        dangerous: bool = False) -> None:
     if len(parts) < 2:
-        skin.error("Usage: block <insert|prepend|append|update|delete|get|children>")
+        skin.error("Usage: block <insert|prepend|append|update|move|delete|get|children>")
         return
     sub = parts[1]
-    if sub == "insert":
-        if len(parts) < 3:
-            skin.error("Usage: block insert <parent_id> <data>")
-            return
-        parsed = _parse_repl_content_source(parts, 2, skin)
+    if sub in ("insert", "prepend", "append", "update"):
+        usage = _repl_signature(f"block {sub}")
+        parsed = _parse_repl_block_write(parts, skin, usage)
         if parsed is None:
             return
-        rest, file_path = parsed
-        if not rest:
-            skin.error("Usage: block insert <parent_id> <data>")
-            return
-        parent_id = rest[0]
-        has_data_arg = len(rest) > 1
-        data = " ".join(rest[1:]) if has_data_arg else ""
-        if file_path:
-            if has_data_arg:
-                skin.error("Provide block data either as an argument or via --file, not both.")
-                return
-            data = _read_file(file_path)
-        elif not has_data_arg:
-            skin.error("Provide block data either as an argument or via --file.")
-            return
-        result = client.insert_block("markdown", data, parent_id=parent_id)
-        if json_mode:
-            click.echo(json.dumps(result, ensure_ascii=False))
+        target_id, data = parsed
+        if sub == "insert":
+            result = client.insert_block("markdown", data, parent_id=target_id)
+            if json_mode:
+                click.echo(json.dumps(result, ensure_ascii=False))
+            else:
+                skin.success("Block inserted")
+        elif sub == "prepend":
+            result = client.prepend_block("markdown", data, target_id)
+            if json_mode:
+                click.echo(json.dumps(result, ensure_ascii=False))
+            else:
+                skin.success("Block prepended")
+        elif sub == "append":
+            result = client.append_block("markdown", data, target_id)
+            if json_mode:
+                click.echo(json.dumps(result, ensure_ascii=False))
+            else:
+                skin.success("Block appended")
         else:
-            skin.success("Block inserted")
-    elif sub == "prepend":
+            client.update_block("markdown", data, target_id)
+            if json_mode:
+                click.echo(json.dumps({"updated": target_id}, ensure_ascii=False))
+            else:
+                skin.success("Block updated")
+    elif sub == "move":
         if len(parts) < 3:
-            skin.error("Usage: block prepend <parent_id> <data>")
+            skin.error(f"Usage: {_repl_signature('block move')}")
             return
-        parsed = _parse_repl_content_source(parts, 2, skin)
-        if parsed is None:
+        block_id = parts[2]
+        previous = _repl_opt(parts[3:], "--previous")
+        parent = _repl_opt(parts[3:], "--parent")
+        if not previous and not parent:
+            skin.error("A destination is required: --previous <id> or --parent <id>")
             return
-        rest, file_path = parsed
-        if not rest:
-            skin.error("Usage: block prepend <parent_id> <data>")
+        if previous and parent:
+            skin.error("Give either --previous or --parent, not both")
             return
-        parent_id = rest[0]
-        has_data_arg = len(rest) > 1
-        data = " ".join(rest[1:]) if has_data_arg else ""
-        if file_path:
-            if has_data_arg:
-                skin.error("Provide block data either as an argument or via --file, not both.")
-                return
-            data = _read_file(file_path)
-        elif not has_data_arg:
-            skin.error("Provide block data either as an argument or via --file.")
-            return
-        client.prepend_block("markdown", data, parent_id)
-        skin.success("Block prepended")
-    elif sub == "append":
-        if len(parts) < 3:
-            skin.error("Usage: block append <parent_id> <data>")
-            return
-        parsed = _parse_repl_content_source(parts, 2, skin)
-        if parsed is None:
-            return
-        rest, file_path = parsed
-        if not rest:
-            skin.error("Usage: block append <parent_id> <data>")
-            return
-        parent_id = rest[0]
-        has_data_arg = len(rest) > 1
-        data = " ".join(rest[1:]) if has_data_arg else ""
-        if file_path:
-            if has_data_arg:
-                skin.error("Provide block data either as an argument or via --file, not both.")
-                return
-            data = _read_file(file_path)
-        elif not has_data_arg:
-            skin.error("Provide block data either as an argument or via --file.")
-            return
-        client.append_block("markdown", data, parent_id)
-        skin.success("Block appended")
-    elif sub == "update":
-        if len(parts) < 3:
-            skin.error("Usage: block update <block_id> <data>")
-            return
-        parsed = _parse_repl_content_source(parts, 2, skin)
-        if parsed is None:
-            return
-        rest, file_path = parsed
-        if not rest:
-            skin.error("Usage: block update <block_id> <data>")
-            return
-        block_id = rest[0]
-        has_data_arg = len(rest) > 1
-        data = " ".join(rest[1:]) if has_data_arg else ""
-        if file_path:
-            if has_data_arg:
-                skin.error("Provide block data either as an argument or via --file, not both.")
-                return
-            data = _read_file(file_path)
-        elif not has_data_arg:
-            skin.error("Provide block data either as an argument or via --file.")
-            return
-        client.update_block("markdown", data, block_id)
-        skin.success("Block updated")
+        client.move_block(block_id, previous_id=previous, parent_id=parent)
+        if json_mode:
+            click.echo(json.dumps({"moved": block_id, "previousID": previous,
+                                   "parentID": parent}, ensure_ascii=False))
+        else:
+            skin.success("Block moved")
     elif sub == "delete" and len(parts) >= 3:
         if not dangerous:
             skin.error("Refusing to delete a block without confirmation. Add --dangerous.")
             return
         client.delete_block(parts[2])
-        skin.success("Block deleted")
+        if json_mode:
+            click.echo(json.dumps({"deleted": parts[2]}, ensure_ascii=False))
+        else:
+            skin.success("Block deleted")
     elif sub == "get" and len(parts) >= 3:
         kramdown = client.get_block_kramdown(parts[2])
         if json_mode:
@@ -642,15 +951,90 @@ def _handle_block_repl(skin: Any, client: SiYuanClient,
                        [[c.get("id", ""), c.get("type", ""), c.get("subType", "")]
                         for c in children])
     else:
-        skin.error("Invalid block command")
+        _repl_reject(skin, f"block {sub}", f"Unknown block command: {sub}")
+
+
+def _handle_asset_repl(skin: Any, client: SiYuanClient,
+                       parts: list[str], json_mode: bool) -> None:
+    usage = f"Usage: {_repl_signature('asset upload')}"
+    if len(parts) < 2:
+        skin.error(usage)
+        return
+    if parts[1] != "upload":
+        _repl_reject(skin, f"asset {parts[1]}", f"Unknown asset command: {parts[1]}")
+        return
+    assets_dir = _repl_opt(parts[2:], "--dir") or "/assets/"
+    files = _repl_positionals(parts[2:], ("--dir",))
+    if not files:
+        skin.error(usage)
+        return
+    missing = [f for f in files if not os.path.isfile(f)]
+    if missing:
+        skin.error("File not found: " + ", ".join(missing))
+        return
+    result = client.upload_asset(files, assets_dir_path=assets_dir)
+    succ = result.get("succMap", {}) if isinstance(result, dict) else {}
+    errs = result.get("errFiles", []) if isinstance(result, dict) else []
+    if json_mode:
+        click.echo(json.dumps({"succMap": succ, "errFiles": errs}, ensure_ascii=False))
+    else:
+        for src, dest in succ.items():
+            click.echo(f"{dest}\t<- {src}")
+        skin.success(f"Uploaded {len(succ)} asset(s)")
+    if errs:
+        skin.error("Upload failed for: " + ", ".join(errs))
+
+
+def _handle_attr_repl(skin: Any, client: SiYuanClient,
+                      parts: list[str], json_mode: bool) -> None:
+    usage = "Usage: attr <get|set|unset> <block-id> [KEY=VALUE | KEY]..."
+    if len(parts) < 3:
+        skin.error(usage)
+        return
+    sub, block_id = parts[1], parts[2]
+    if sub == "get":
+        attrs = client.get_block_attrs(block_id)
+        if json_mode:
+            click.echo(json.dumps(attrs, ensure_ascii=False))
+        elif not attrs:
+            skin.info("No attributes")
+        else:
+            skin.table(["Attribute", "Value"],
+                       [[k, attrs[k]] for k in sorted(attrs)])
+    elif sub == "set":
+        if len(parts) < 4:
+            skin.error(f"Usage: {_repl_signature('attr set')}")
+            return
+        try:
+            attrs = _parse_attr_pairs(tuple(parts[3:]))
+        except click.UsageError as e:
+            skin.error(str(e))
+            return
+        client.set_block_attrs(block_id, attrs)
+        if json_mode:
+            click.echo(json.dumps({"updated": block_id, "attrs": attrs}, ensure_ascii=False))
+        else:
+            skin.success(f"Set {len(attrs)} attribute(s)")
+    elif sub == "unset":
+        if len(parts) < 4:
+            skin.error(f"Usage: {_repl_signature('attr unset')}")
+            return
+        keys = list(parts[3:])
+        client.set_block_attrs(block_id, {key: "" for key in keys})
+        if json_mode:
+            click.echo(json.dumps({"updated": block_id, "removed": keys}, ensure_ascii=False))
+        else:
+            skin.success(f"Removed {len(keys)} attribute(s)")
+    else:
+        _repl_reject(skin, f"attr {sub}", f"Unknown attr command: {sub}")
 
 
 def _handle_sql_repl(skin: Any, client: SiYuanClient,
                      parts: list[str], json_mode: bool) -> None:
-    rest = parts[1:]
-    if rest and rest[0] == "--":
-        rest = rest[1:]  # drop the option terminator
-    stmt = " ".join(rest)
+    if len(parts) < 2:
+        skin.error(f"Usage: {_repl_signature('sql')}")
+        return
+    stmt = " ".join(parts[1:])
     results = client.query_sql(stmt)
     if json_mode:
         click.echo(json.dumps(results, ensure_ascii=False))
@@ -664,10 +1048,10 @@ def _handle_sql_repl(skin: Any, client: SiYuanClient,
 
 def _handle_search_repl(skin: Any, client: SiYuanClient,
                         parts: list[str], json_mode: bool) -> None:
-    rest = parts[1:]
-    if rest and rest[0] == "--":
-        rest = rest[1:]  # drop the option terminator
-    query = " ".join(rest)
+    if len(parts) < 2:
+        skin.error(f"Usage: {_repl_signature('search')}")
+        return
+    query = " ".join(parts[1:])
     data = client.search_blocks(query)
     blocks = data.get("blocks", []) if isinstance(data, dict) else data
     matched = data.get("matchedBlockCount") if isinstance(data, dict) else None
@@ -692,7 +1076,45 @@ def _handle_export_repl(skin: Any, client: SiYuanClient,
             skin.section(md.get("hPath", ""))
             click.echo(md.get("content", ""))
     else:
-        skin.error("Usage: export md <doc-id>")
+        _repl_reject(skin, f"export {parts[1]}", f"Unknown export command: {parts[1]}")
+
+
+def _handle_tag_repl(skin: Any, client: SiYuanClient,
+                     parts: list[str], json_mode: bool) -> None:
+    if len(parts) < 2 or parts[1] != "list":
+        _repl_reject(skin, f"tag {parts[1]}" if len(parts) > 1 else "tag",
+                     "Usage: tag list")
+        return
+    tags = client.get_tags()
+    if json_mode:
+        click.echo(json.dumps(tags, ensure_ascii=False))
+    else:
+        _print_tags(tags)
+
+
+def _handle_version_repl(skin: Any, client: SiYuanClient,
+                         json_mode: bool) -> None:
+    ver = client.get_version()
+    if json_mode:
+        click.echo(json.dumps({"version": ver}, ensure_ascii=False))
+    else:
+        skin.success(f"SiYuan version: {ver}")
+
+
+def _handle_status_repl(skin: Any, client: SiYuanClient,
+                        session: SessionManager, json_mode: bool) -> None:
+    info = _status_info(client, session)
+    if json_mode:
+        click.echo(json.dumps(info, ensure_ascii=False))
+    else:
+        version = info["siyuan_version"]
+        skin.status_block({
+            "Connected": str(info["connected"]),
+            "SiYuan": f"v{version}" if version else "(unknown)",
+            "Host": f"{info['host']}:{info['port']}",
+            "Notebook": info["current_notebook"] or "(none)",
+            "Document": info["current_doc"] or "(none)",
+        }, title="Status")
 
 
 # ── Notebook commands ──────────────────────────────────────────────────
@@ -760,13 +1182,7 @@ def notebook_rename(ctx: SiYuanContext, notebook_id: str, name: str):
 @click.pass_obj
 def notebook_open(ctx: SiYuanContext, notebook_id: str):
     """Open a notebook."""
-    ctx.client.open_notebook(notebook_id)
-    name = notebook_id
-    for nb in ctx.client.list_notebooks():
-        if nb.get("id") == notebook_id:
-            name = nb.get("name", notebook_id)
-            break
-    ctx.session.update(current_notebook_id=notebook_id, current_notebook_name=name)
+    name = _open_notebook(ctx.client, ctx.session, notebook_id)
     ctx.session.flush()
     if ctx.json_output:
         click.echo(json.dumps({"opened": notebook_id, "name": name}, ensure_ascii=False))
@@ -784,8 +1200,8 @@ def doc():
 @doc.command("create")
 @click.argument("notebook_id")
 @click.argument("path")
-@click.option("--md", default="", help="Markdown content.")
-@click.option("--file", "file_path", default="", help="Read markdown content from a UTF-8 file (avoids PowerShell pipe encoding issues).")
+@click.option("--md", multiple=True, default=None, callback=_single_use(""), help="Markdown content.")
+@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(""), help="Read markdown content from a UTF-8 file (avoids PowerShell pipe encoding issues).")
 @click.pass_obj
 def doc_create(ctx: SiYuanContext, notebook_id: str, path: str, md: str, file_path: str):
     """Create a document with optional Markdown content.
@@ -824,8 +1240,8 @@ def doc_list(ctx: SiYuanContext, notebook_id: str, path: str):
 
 @doc.command("tree")
 @click.argument("notebook_id")
-@click.option("--path", default="/", help="Root path")
-@click.option("--depth", default=-1, type=int, help="Max depth")
+@click.option("--path", multiple=True, default=None, callback=_single_use("/"), help="Root path")
+@click.option("--depth", multiple=True, default=None, type=int, callback=_single_use(-1), help="Max depth")
 @click.pass_obj
 def doc_tree(ctx: SiYuanContext, notebook_id: str, path: str, depth: int):
     """List document tree."""
@@ -890,24 +1306,17 @@ def block():
 
 @block.command("insert")
 @click.argument("data", required=False)
-@click.option("--previous", default="", help="Previous block ID")
-@click.option("--parent", default="", help="Parent block ID")
-@click.option("--next", "next_", default="", help="Next block ID")
-@click.option("--data-type", default="markdown", help="Data type (markdown/dom)")
-@click.option("--file", "file_path", default="", help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
+@click.option("--previous", multiple=True, default=None, callback=_single_use(""), help="Previous block ID")
+@click.option("--parent", multiple=True, default=None, callback=_single_use(""), help="Parent block ID")
+@click.option("--next", "next_", multiple=True, default=None, callback=_single_use(""), help="Next block ID")
+@click.option("--data-type", multiple=True, default=None, callback=_single_use("markdown"), help="Data type (markdown/dom)")
+@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(""), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
 @click.pass_obj
 def block_insert(ctx: SiYuanContext, data: str | None, previous: str, parent: str, next_: str, data_type: str, file_path: str):
     """Insert a block. Reads from stdin when no data is given (empty pipe is rejected)."""
     if not parent and not previous and not next_:
         raise click.UsageError("An anchor is required: --parent, --previous, or --next")
-    if file_path:
-        if data is not None:
-            raise click.UsageError("Provide block data either as an argument or via --file, not both.")
-        data = _read_file(file_path)
-    elif data is None:
-        data = _read_stdin()
-        if not data:
-            raise click.UsageError("No block content provided: give it as an argument, via --file, or pipe a non-empty stdin.")
+    data = _resolve_block_data(data, file_path)
     result = ctx.client.insert_block(data_type, data, parent_id=parent, previous_id=previous, next_id=next_)
     if ctx.json_output:
         click.echo(json.dumps(result, ensure_ascii=False))
@@ -915,22 +1324,47 @@ def block_insert(ctx: SiYuanContext, data: str | None, previous: str, parent: st
         click.echo("Block inserted")
 
 
+@block.command("prepend")
+@click.argument("parent_id")
+@click.argument("data", required=False)
+@click.option("--data-type", multiple=True, default=None, callback=_single_use("markdown"), help="Data type (markdown/dom)")
+@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(""), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
+@click.pass_obj
+def block_prepend(ctx: SiYuanContext, parent_id: str, data: str | None, data_type: str, file_path: str):
+    """Insert a block as the first child of a container block. Reads from stdin when no data is given."""
+    data = _resolve_block_data(data, file_path)
+    result = ctx.client.prepend_block(data_type, data, parent_id)
+    if ctx.json_output:
+        click.echo(json.dumps(result, ensure_ascii=False))
+    else:
+        click.echo(f"Block prepended to: {parent_id}")
+
+
+@block.command("append")
+@click.argument("parent_id")
+@click.argument("data", required=False)
+@click.option("--data-type", multiple=True, default=None, callback=_single_use("markdown"), help="Data type (markdown/dom)")
+@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(""), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
+@click.pass_obj
+def block_append(ctx: SiYuanContext, parent_id: str, data: str | None, data_type: str, file_path: str):
+    """Insert a block as the last child of a container block. Reads from stdin when no data is given."""
+    data = _resolve_block_data(data, file_path)
+    result = ctx.client.append_block(data_type, data, parent_id)
+    if ctx.json_output:
+        click.echo(json.dumps(result, ensure_ascii=False))
+    else:
+        click.echo(f"Block appended to: {parent_id}")
+
+
 @block.command("update")
 @click.argument("block_id")
 @click.argument("data", required=False)
-@click.option("--data-type", default="markdown", help="Data type")
-@click.option("--file", "file_path", default="", help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
+@click.option("--data-type", multiple=True, default=None, callback=_single_use("markdown"), help="Data type")
+@click.option("--file", "file_path", multiple=True, default=None, callback=_single_use(""), help="Read block data from a UTF-8 file (avoids PowerShell pipe encoding issues).")
 @click.pass_obj
 def block_update(ctx: SiYuanContext, block_id: str, data: str | None, data_type: str, file_path: str):
     """Update a block's content. Reads from stdin when no data is given."""
-    if file_path:
-        if data is not None:
-            raise click.UsageError("Provide block data either as an argument or via --file, not both.")
-        data = _read_file(file_path)
-    elif data is None:
-        data = _read_stdin()
-        if not data:
-            raise click.UsageError("No block content provided: give it as an argument, via --file, or pipe a non-empty stdin.")
+    data = _resolve_block_data(data, file_path)
     ctx.client.update_block(data_type, data, block_id)
     if ctx.json_output:
         click.echo(json.dumps({"updated": block_id}, ensure_ascii=False))
@@ -975,6 +1409,120 @@ def block_children(ctx: SiYuanContext, block_id: str):
     else:
         for c in children:
             click.echo(f"{c.get('id', ''):<30} {c.get('type', ''):<8} {c.get('subType', '')}")
+
+
+@block.command("move")
+@click.argument("block_id")
+@click.option("--previous", multiple=True, default=None, callback=_single_use(""), help="Land right after this block ID (same level). Pass the current last block to append at the end of a document.")
+@click.option("--parent", multiple=True, default=None, callback=_single_use(""), help="Land inside this block, as its first child. The parent must be a container block (document, list, super block) — paragraph-like leaf blocks reject children.")
+@click.pass_obj
+def block_move(ctx: SiYuanContext, block_id: str, previous: str, parent: str):
+    """Move a block to a new position.
+
+    --previous keeps the block at its own level (moves it after a sibling);
+    --parent nests it as the first child of a container block. Exactly one
+    destination is needed — the API has no "last child" anchor, so use
+    --previous with the current last child ID to append.
+    """
+    if not previous and not parent:
+        raise click.UsageError("A destination is required: --previous <id> or --parent <id>")
+    if previous and parent:
+        raise click.UsageError("Give either --previous or --parent, not both")
+    ctx.client.move_block(block_id, previous_id=previous, parent_id=parent)
+    if ctx.json_output:
+        click.echo(json.dumps({"moved": block_id, "previousID": previous, "parentID": parent}, ensure_ascii=False))
+    else:
+        destination = f"after {previous}" if previous else f"into {parent}"
+        click.echo(f"Moved block: {block_id} ({destination})")
+
+
+# ── Asset commands ─────────────────────────────────────────────────────
+
+@cli.group()
+def asset():
+    """Manage assets (资源文件)."""
+
+
+@asset.command("upload")
+@click.argument("files", nargs=-1, required=True)
+@click.option("--dir", "assets_dir", multiple=True, default=None, callback=_single_use("/assets/"),
+              help="Target directory inside the workspace (default: /assets/).")
+@click.pass_obj
+def asset_upload(ctx: SiYuanContext, files: tuple[str, ...], assets_dir: str):
+    """Upload local files and print the asset paths to reference in markdown.
+
+    Example:
+      sy asset upload pic.png cover.jpg --dir /assets/notes/
+    """
+    missing = [f for f in files if not os.path.isfile(f)]
+    if missing:
+        raise click.UsageError("File not found: " + ", ".join(missing))
+    result = ctx.client.upload_asset(list(files), assets_dir_path=assets_dir)
+    succ = result.get("succMap", {}) if isinstance(result, dict) else {}
+    errs = result.get("errFiles", []) if isinstance(result, dict) else []
+    if ctx.json_output:
+        click.echo(json.dumps({"succMap": succ, "errFiles": errs}, ensure_ascii=False))
+    else:
+        for src, dest in succ.items():
+            click.echo(f"{dest}\t<- {src}")
+    if errs:
+        raise click.ClickException("Upload failed for: " + ", ".join(errs))
+
+
+# ── Attribute commands ─────────────────────────────────────────────────
+
+@cli.group()
+def attr():
+    """Read and write block attributes (块属性)."""
+
+
+@attr.command("get")
+@click.argument("block_id")
+@click.pass_obj
+def attr_get(ctx: SiYuanContext, block_id: str):
+    """Show every attribute of a block."""
+    attrs = ctx.client.get_block_attrs(block_id)
+    if ctx.json_output:
+        click.echo(json.dumps(attrs, ensure_ascii=False))
+    elif not attrs:
+        click.echo("No attributes")
+    else:
+        for key in sorted(attrs):
+            click.echo(f"{key}: {attrs[key]}")
+
+
+@attr.command("set")
+@click.argument("block_id")
+@click.argument("pairs", nargs=-1, required=True)
+@click.pass_obj
+def attr_set(ctx: SiYuanContext, block_id: str, pairs: tuple[str, ...]):
+    """Set block attributes, each given as KEY=VALUE.
+
+    Built-in keys: name (命名), alias (别名), memo (备注), bookmark (书签);
+    custom keys must be prefixed with "custom-". An empty value removes the key.
+
+    Example:
+      sy attr set <block-id> custom-status=todo name=待核验
+    """
+    attrs = _parse_attr_pairs(pairs)
+    ctx.client.set_block_attrs(block_id, attrs)
+    if ctx.json_output:
+        click.echo(json.dumps({"updated": block_id, "attrs": attrs}, ensure_ascii=False))
+    else:
+        click.echo(f"Set {len(attrs)} attribute(s) on {block_id}")
+
+
+@attr.command("unset")
+@click.argument("block_id")
+@click.argument("keys", nargs=-1, required=True)
+@click.pass_obj
+def attr_unset(ctx: SiYuanContext, block_id: str, keys: tuple[str, ...]):
+    """Remove attributes by key (the kernel drops a key set to an empty value)."""
+    ctx.client.set_block_attrs(block_id, {key: "" for key in keys})
+    if ctx.json_output:
+        click.echo(json.dumps({"updated": block_id, "removed": list(keys)}, ensure_ascii=False))
+    else:
+        click.echo(f"Removed {len(keys)} attribute(s) from {block_id}")
 
 
 # ── SQL command ────────────────────────────────────────────────────────
@@ -1057,25 +1605,14 @@ def version(ctx: SiYuanContext):
 @click.pass_obj
 def status(ctx: SiYuanContext):
     """Show connection and session status."""
-    connected = ctx.client.ping()
-    siyuan_ver = ctx.client.get_version() if connected else ""
-    session = ctx.session
-    state = session.state
-
-    info = {
-        "connected": connected,
-        "siyuan_version": siyuan_ver,
-        "host": ctx.client.config.host,
-        "port": ctx.client.config.port,
-        "current_notebook": state.current_notebook_name or "",
-        "current_doc": state.current_doc_path or "",
-    }
+    info = _status_info(ctx.client, ctx.session)
+    siyuan_ver = info["siyuan_version"]
 
     if ctx.json_output:
         click.echo(json.dumps(info, ensure_ascii=False))
     else:
         click.echo(f"  Connected:     {info['connected']}")
-        click.echo(f"  SiYuan:        v{info['siyuan_version']}")
+        click.echo(f"  SiYuan:        {f'v{siyuan_ver}' if siyuan_ver else '(unknown)'}")
         click.echo(f"  Host:          {info['host']}:{info['port']}")
         click.echo(f"  Notebook:      {info['current_notebook']}")
         click.echo(f"  Document:      {info['current_doc']}")

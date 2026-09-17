@@ -14,6 +14,8 @@ from click.testing import CliRunner
 
 from cli_anything.siyuan.siyuan_cli import (
     _dispatch_repl,
+    _handle_asset_repl,
+    _handle_attr_repl,
     _handle_block_repl,
     _handle_doc_repl,
     _handle_notebook_repl,
@@ -472,6 +474,199 @@ class TestBlockDeleteCommand:
             mock_ctx.client.delete_block.assert_called_once_with("b1")
 
 
+# ── block move ─────────────────────────────────────────────────────────
+
+
+class TestBlockMoveCommand:
+    def test_move_after_previous(self, runner, mock_ctx):
+        """block move --previous reorders the block at its own level."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "move", "b1", "--previous", "b2"])
+            assert result.exit_code == 0
+            mock_ctx.client.move_block.assert_called_once_with(
+                "b1", previous_id="b2", parent_id=""
+            )
+            assert "b1" in result.output
+
+    def test_move_into_parent(self, runner, mock_ctx):
+        """block move --parent nests the block under another block."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "move", "b1", "--parent", "p1"])
+            assert result.exit_code == 0
+            mock_ctx.client.move_block.assert_called_once_with(
+                "b1", previous_id="", parent_id="p1"
+            )
+
+    def test_move_without_destination_errors(self, runner, mock_ctx):
+        """block move needs one destination anchor."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "move", "b1"])
+            assert result.exit_code == 2
+            assert "destination" in result.output.lower()
+            mock_ctx.client.move_block.assert_not_called()
+
+    def test_move_with_both_destinations_errors(self, runner, mock_ctx):
+        """--previous and --parent are mutually exclusive."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(
+                cli, ["block", "move", "b1", "--previous", "b2", "--parent", "p1"]
+            )
+            assert result.exit_code == 2
+            mock_ctx.client.move_block.assert_not_called()
+
+    def test_move_json_output(self, runner, mock_ctx):
+        """--json block move reports the destination anchors."""
+        mock_ctx.json_output = True
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["--json", "block", "move", "b1", "--previous", "b2"])
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert data == {"moved": "b1", "previousID": "b2", "parentID": ""}
+
+
+class TestReplBlockMove:
+    def test_repl_move_with_previous(self):
+        """REPL block move --previous reaches the client."""
+        skin = MagicMock()
+        client = MagicMock()
+        _handle_block_repl(
+            skin, client, ["block", "move", "b1", "--previous", "b2"], False, False
+        )
+        client.move_block.assert_called_once_with("b1", previous_id="b2", parent_id="")
+        skin.success.assert_called_once()
+
+    def test_repl_move_with_parent(self):
+        """REPL block move --parent reaches the client."""
+        skin = MagicMock()
+        client = MagicMock()
+        _handle_block_repl(
+            skin, client, ["block", "move", "b1", "--parent", "p1"], False, False
+        )
+        client.move_block.assert_called_once_with("b1", previous_id="", parent_id="p1")
+
+    def test_repl_move_without_destination_errors(self):
+        """REPL block move refuses without a destination."""
+        skin = MagicMock()
+        client = MagicMock()
+        _handle_block_repl(skin, client, ["block", "move", "b1"], False, False)
+        client.move_block.assert_not_called()
+        skin.error.assert_called_once()
+
+
+# ── a repeated option is an error, not last-wins ───────────────────────
+
+
+class TestRepeatedOptions:
+    """click's default is last-wins; the REPL rejects a repeat, so one-shot does too."""
+
+    @pytest.mark.parametrize("args", [
+        ["doc", "tree", "nb1", "--path", "/a", "--path", "/b"],
+        ["doc", "tree", "nb1", "--depth", "1", "--depth", "2"],
+        ["doc", "create", "nb1", "/p", "--md", "a", "--md", "b"],
+        ["block", "update", "b1", "x", "--file", "a.md", "--file", "b.md"],
+        ["block", "move", "b1", "--previous", "a", "--previous", "b"],
+        ["block", "insert", "x", "--parent", "a", "--parent", "b"],
+        ["asset", "upload", "PLACEHOLDER", "--dir", "/a/", "--dir", "/b/"],
+        ["--port", "1", "--port", "2", "version"],
+    ])
+    def test_repeated_option_is_rejected(self, runner, mock_ctx, tmp_path, args):
+        if "PLACEHOLDER" in args:
+            src = tmp_path / "p.png"
+            src.write_bytes(b"p")
+            args = [str(src) if a == "PLACEHOLDER" else a for a in args]
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, args)
+        assert result.exit_code == 2
+        assert "more than once" in result.output
+
+    def test_single_occurrence_keeps_its_value(self, runner, mock_ctx):
+        """The multiple=True plumbing must not wrap the value in a tuple."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["doc", "tree", "nb1", "--depth", "3"])
+        assert result.exit_code == 0
+        mock_ctx.client.list_doc_tree.assert_called_once_with("nb1", path="/", max_depth=3)
+
+    def test_option_defaults_survive(self, runner, mock_ctx, tmp_path):
+        """Every fallback is now supplied by the callback, so check the ones with real defaults."""
+        src = tmp_path / "p.png"
+        src.write_bytes(b"p")
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            runner.invoke(cli, ["block", "update", "b1", "hi"])
+            runner.invoke(cli, ["doc", "create", "nb1", "/p"])
+            runner.invoke(cli, ["asset", "upload", str(src)])
+        mock_ctx.client.update_block.assert_called_once_with("markdown", "hi", "b1")
+        mock_ctx.client.create_doc_with_md.assert_called_once_with("nb1", "/p", "")
+        mock_ctx.client.upload_asset.assert_called_once_with(
+            [str(src)], assets_dir_path="/assets/")
+
+    def test_connection_flags_still_reach_the_config(self, runner, mock_ctx):
+        """--port carries an int fallback; a tuple or a string would break the URL."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanClient") as client_cls, \
+                patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            runner.invoke(cli, ["--host", "10.0.0.1", "--port", "7777", "version"])
+        cfg = client_cls.call_args[0][0]
+        assert (cfg.host, cfg.port) == ("10.0.0.1", 7777)
+
+
+# ── block prepend / append (one-shot parity with the REPL) ─────────────
+
+
+class TestBlockPrependAppendCommand:
+    """The REPL exposed prepend/append while one-shot had no wrapper for them."""
+
+    def test_prepend_reaches_client(self, runner, mock_ctx):
+        mock_ctx.client.prepend_block.return_value = [{"id": "new1"}]
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "prepend", "p1", "hello"])
+        assert result.exit_code == 0
+        mock_ctx.client.prepend_block.assert_called_once_with("markdown", "hello", "p1")
+        assert "p1" in result.output
+
+    def test_append_reaches_client(self, runner, mock_ctx):
+        mock_ctx.client.append_block.return_value = [{"id": "new1"}]
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "append", "p1", "hello"])
+        assert result.exit_code == 0
+        mock_ctx.client.append_block.assert_called_once_with("markdown", "hello", "p1")
+
+    def test_append_json(self, runner, mock_ctx):
+        mock_ctx.json_output = True
+        mock_ctx.client.append_block.return_value = [{"id": "new1"}]
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["--json", "block", "append", "p1", "hi"])
+        assert json.loads(result.output) == [{"id": "new1"}]
+
+    def test_prepend_reads_file(self, runner, mock_ctx, tmp_path):
+        src = tmp_path / "note.md"
+        src.write_text("来自文件", encoding="utf-8")
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "prepend", "p1", "--file", str(src)])
+        assert result.exit_code == 0
+        mock_ctx.client.prepend_block.assert_called_once_with("markdown", "来自文件", "p1")
+
+    def test_prepend_requires_parent(self, runner, mock_ctx):
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "prepend"])
+        assert result.exit_code == 2
+        mock_ctx.client.prepend_block.assert_not_called()
+
+    def test_prepend_rejects_argument_and_file(self, runner, mock_ctx, tmp_path):
+        src = tmp_path / "note.md"
+        src.write_text("x", encoding="utf-8")
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(
+                cli, ["block", "prepend", "p1", "arg", "--file", str(src)])
+        assert result.exit_code == 2
+        mock_ctx.client.prepend_block.assert_not_called()
+
+    def test_append_explicit_empty_is_content(self, runner, mock_ctx):
+        """An explicit empty argument is content, not a missing-content error."""
+        with patch("cli_anything.siyuan.siyuan_cli.SiYuanContext", return_value=mock_ctx):
+            result = runner.invoke(cli, ["block", "append", "p1", ""])
+        assert result.exit_code == 0
+        mock_ctx.client.append_block.assert_called_once_with("markdown", "", "p1")
+
+
 # ── --file reads content directly (avoids PowerShell pipe mangling) ────
 
 
@@ -594,6 +789,13 @@ class TestStdinDecoding:
         monkeypatch.setenv("SIYUAN_STDIN_ENCODING", "no-such-codec")
         with pytest.raises(UsageError):
             _read_stdin()
+
+    def test_read_stdin_undecodable_errors(self, monkeypatch):
+        """Bytes that fit neither candidate are refused, not stored as mojibake."""
+        monkeypatch.setattr(sys, "stdin", _FakeStdin(b"\xff\xfe\x81"))
+        with pytest.raises(UsageError) as exc:
+            _read_stdin()
+        assert "SIYUAN_STDIN_ENCODING" in str(exc.value)
 
 
 # ── REPL delete confirmation and --file ────────────────────────────────
