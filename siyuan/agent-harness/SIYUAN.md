@@ -192,16 +192,17 @@ cli-anything-siyuan block move <block_id> --previous <sibling_id>
 # Nest — land as the first child of another block
 cli-anything-siyuan block move <block_id> --parent <parent_id>
 
-# Append among siblings: the API has no "last child" anchor, so target the
-# current last block and ask to sit after it
-cli-anything-siyuan block move <block_id> --previous <last_block_id>
+# Place after a specific sibling (the API has no "next sibling" flag either,
+# so name the block it should follow)
+cli-anything-siyuan block move <block_id> --previous <sibling_id>
 ```
 
-Why this matters: `block insert` inserts as the **first** child, so "add this
-section at the end of a container" is `block append <parent-id>` — reserve
-`block move` for putting an *existing* block somewhere else. Never reorder a
-document by deleting and recreating it: that replaces every child block ID and
-invalidates any references to them.
+Why this matters: `block insert` lands as the **first** child and `block move`
+relocates a block that already exists. To put *new* content at the end of a
+container, use `block append <parent-id>` — do not reach for
+`move --previous <last-id>`, which is only for naming a specific sibling. Never
+reorder a document by deleting and recreating it: that replaces every child
+block ID and invalidates any references to them.
 
 Note the asymmetry in the kernel API: `insertBlock` accepts `previousID`,
 `parentID` and `nextID`, while `moveBlock` accepts only `previousID` and

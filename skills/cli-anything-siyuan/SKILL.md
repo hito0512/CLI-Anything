@@ -51,9 +51,11 @@ documents, blocks, search, and export.
 | `get <id>` | Get block kramdown source |
 | `children <id>` | Get child blocks |
 
-`insert` always lands as the **first** child, so appending to a document is
-either `append <doc-id>` or, to keep a specific level, insert then
-`move <id> --previous <current-last-id>`. Note the anchor asymmetry: `insert`
+`insert` lands as the **first** child and takes exactly one anchor — the kernel
+applies `nextID > previousID > parentID` and drops the rest, so two anchors are
+rejected rather than half-honoured. To land at the end of a container use
+`append <parent-id>`; `move` is for relocating a block that already exists.
+Note the anchor asymmetry: `insert`
 takes `--next` but `move` does not.
 
 ### asset — Asset (资源文件) upload
