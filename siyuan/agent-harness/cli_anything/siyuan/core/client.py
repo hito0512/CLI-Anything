@@ -3,6 +3,7 @@
 Handles connection, authentication, and request/response to the SiYuan kernel.
 """
 
+import html
 import json
 import os
 from dataclasses import dataclass
@@ -10,6 +11,30 @@ from pathlib import Path
 from typing import Any
 
 import requests
+
+
+def _unescape_tag_names(tags: Any) -> list[dict[str, Any]]:
+    """Decode HTML entities in tag names, recursively.
+
+    The kernel escapes tag names before returning them
+    (`util.EscapeHTML` in kernel/model/tag.go) because its own consumers
+    render HTML; a terminal client must undo that, or a tag reads
+    ``-&gt;return-type`` instead of ``->return-type``.
+    """
+    result: list[dict[str, Any]] = []
+    if not isinstance(tags, list):
+        return result
+    for tag in tags:
+        if not isinstance(tag, dict):
+            continue
+        node = dict(tag)
+        if isinstance(node.get("name"), str):
+            node["name"] = html.unescape(node["name"])
+        children = node.get("children")
+        if isinstance(children, list):
+            node["children"] = _unescape_tag_names(children)
+        result.append(node)
+    return result
 
 
 @dataclass(frozen=True)
@@ -82,11 +107,11 @@ class SiYuanClient:
             self._session.headers["Authorization"] = f"Token {self.config.token}"
         self._session.headers["Content-Type"] = "application/json"
 
-    def _post(self, endpoint: str, data: dict[str, Any] | None = None) -> Any:
-        """Make a POST request to the SiYuan API."""
+    def _request(self, endpoint: str, timeout: int = 30, **kwargs: Any) -> Any:
+        """POST to the SiYuan API and unwrap the response envelope."""
         url = f"{self.config.base_url}{endpoint}"
         try:
-            resp = self._session.post(url, json=data or {}, timeout=30)
+            resp = self._session.post(url, timeout=timeout, **kwargs)
         except requests.ConnectionError as e:
             raise SiYuanClientError(
                 f"Cannot connect to SiYuan at {self.config.base_url}. "
@@ -94,7 +119,7 @@ class SiYuanClient:
             ) from e
         except requests.Timeout as e:
             raise SiYuanClientError(
-                f"Request to SiYuan timed out after 30s ({e})"
+                f"Request to SiYuan timed out after {timeout}s ({e})"
             ) from e
         except requests.RequestException as e:
             raise SiYuanClientError(
@@ -118,6 +143,10 @@ class SiYuanClient:
             msg = body.get("msg", "unknown error") if isinstance(body, dict) else str(body)
             raise SiYuanClientError(f"API error: {msg}")
         return body.get("data") if isinstance(body, dict) else body
+
+    def _post(self, endpoint: str, data: dict[str, Any] | None = None) -> Any:
+        """Make a JSON POST request to the SiYuan API."""
+        return self._request(endpoint, json=data or {})
 
     def ping(self) -> bool:
         """Check if SiYuan kernel is reachable."""
@@ -297,7 +326,7 @@ class SiYuanClient:
 
     def get_block_kramdown(self, block_id: str) -> str:
         data = self._post("/api/block/getBlockKramdown", {"id": block_id})
-        return data.get("kramdown", "")
+        return data.get("kramdown", "") if isinstance(data, dict) else ""
 
     def get_child_blocks(self, block_id: str) -> list[dict[str, Any]]:
         return self._post("/api/block/getChildBlocks", {"id": block_id})
@@ -309,6 +338,39 @@ class SiYuanClient:
 
     def get_block_attrs(self, block_id: str) -> dict[str, str]:
         return self._post("/api/attr/getBlockAttrs", {"id": block_id})
+
+    # ── Asset API ──────────────────────────────────────────────────────
+
+    def upload_asset(self, file_paths: list[str],
+                     assets_dir_path: str = "/assets/") -> dict[str, Any]:
+        """Upload local files as workspace assets.
+
+        Returns the kernel payload: ``{"errFiles": [...], "succMap": {...}}``.
+        The session carries a JSON Content-Type by default; passing
+        ``Content-Type: None`` drops it for this call so requests can set the
+        multipart boundary itself — a leftover ``application/json`` header
+        makes the kernel reject the form.
+        """
+        handles = []
+        files = []
+        try:
+            for path in file_paths:
+                try:
+                    handle = open(path, "rb")
+                except OSError as e:
+                    raise SiYuanClientError(f"Cannot read '{path}': {e}") from e
+                handles.append(handle)
+                files.append(("file[]", (Path(path).name, handle)))
+            return self._request(
+                "/api/asset/upload",
+                timeout=300,
+                data={"assetsDirPath": assets_dir_path},
+                files=files,
+                headers={"Content-Type": None},
+            )
+        finally:
+            for handle in handles:
+                handle.close()
 
     # ── SQL Query API ──────────────────────────────────────────────────
 
@@ -323,11 +385,12 @@ class SiYuanClient:
         })
 
     def search_tag(self, tag: str = "") -> list[str]:
-        """Search tags. Returns list of tag name strings."""
+        """Search tags. Returns list of tag name strings (HTML entities decoded)."""
         data = self._post("/api/search/searchTag", {"k": tag})
         if isinstance(data, dict):
-            return data.get("tags", [])
-        return data or []
+            return [html.unescape(t) if isinstance(t, str) else t
+                    for t in data.get("tags", [])]
+        return [html.unescape(t) if isinstance(t, str) else t for t in data or []]
 
     def find_replace(self, keyword: str, replacement: str, ids: list[str]) -> None:
         """Search and replace text in blocks by ID."""
@@ -345,12 +408,21 @@ class SiYuanClient:
         if name:
             params["name"] = name
         data = self._post("/api/export/exportResources", params)
-        return data.get("path", "")
+        return data.get("path", "") if isinstance(data, dict) else ""
 
     # ── Tag API ────────────────────────────────────────────────────────
 
     def get_tags(self) -> list[dict[str, Any]]:
-        return self._post("/api/tag/getTag", {"ignoreMaxListHint": True})
+        """List tags. Returns tag dicts with HTML entities in names decoded.
+
+        The kernel replies with a bare array; accept a ``{"tags": [...]}``
+        wrapper too, so a shape change degrades the same way ``search_tag``
+        does instead of silently listing nothing.
+        """
+        data = self._post("/api/tag/getTag", {"ignoreMaxListHint": True})
+        if isinstance(data, dict):
+            data = data.get("tags")
+        return _unescape_tag_names(data)
 
     # ── System API ─────────────────────────────────────────────────────
 

@@ -11,7 +11,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from cli_anything.siyuan.core.client import SiYuanClient, SiYuanConfig, load_config
+from cli_anything.siyuan.core.client import (
+    SiYuanClient,
+    SiYuanClientError,
+    SiYuanConfig,
+    load_config,
+)
 from cli_anything.siyuan.core.session import SessionManager, SessionState
 
 
@@ -232,4 +237,51 @@ class TestUpdateBlockDocRootError:
             client.update_block("markdown", "data", "block-id")
         assert "document root block" not in str(exc.value)
         assert "some other error" in str(exc.value)
+
+
+class TestTagNameUnescaping:
+    """The kernel HTML-escapes tag names; the client decodes them back."""
+
+    @pytest.fixture
+    def client(self):
+        return SiYuanClient(SiYuanConfig(token="test-token"))
+
+    def _mock(self, client, payload):
+        mock_session = MagicMock()
+        mock_session.post.return_value.status_code = 200
+        mock_session.post.return_value.json.return_value = {"code": 0, "data": payload}
+        client._session = mock_session
+
+    def test_get_tags_decodes_name_recursively(self, client):
+        """Nested tag names are decoded; the markup-bearing `label` is left alone."""
+        self._mock(client, [
+            {"name": "-&gt;return-type", "label": "-&gt;return-type", "count": 1,
+             "children": [{"name": "a&amp;b", "count": 1}]},
+        ])
+        tags = client.get_tags()
+        assert tags[0]["name"] == "->return-type"
+        assert tags[0]["children"][0]["name"] == "a&b"
+        assert tags[0]["label"] == "-&gt;return-type"
+
+    def test_get_tags_tolerates_non_list_payload(self, client):
+        self._mock(client, None)
+        assert client.get_tags() == []
+
+    def test_search_tag_decodes_names(self, client):
+        self._mock(client, {"tags": ["-&gt;x", "plain"], "k": "x"})
+        assert client.search_tag("x") == ["->x", "plain"]
+
+    def test_get_tags_accepts_a_wrapped_payload(self, client):
+        """A `{"tags": [...]}` reply lists tags rather than silently listing none."""
+        self._mock(client, {"tags": [{"name": "a&amp;b", "count": 1}]})
+        assert client.get_tags() == [{"name": "a&b", "count": 1}]
+
+
+class TestUploadAssetFileErrors:
+    def test_unreadable_path_is_a_client_error(self, tmp_path):
+        """An OSError while opening used to escape as a raw traceback."""
+        client = SiYuanClient(SiYuanConfig())
+        with pytest.raises(SiYuanClientError) as exc:
+            client.upload_asset([str(tmp_path)])
+        assert "Cannot read" in str(exc.value)
 
